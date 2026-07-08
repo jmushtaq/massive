@@ -1,0 +1,11 @@
+The Massive API returns data in UTC, so:                                                 
+                                                                                                                                                                                        
+     - UTC 14:30–21:00 = US market hours (9:30 AM–4:00 PM ET, since US markets are UTC-5 winter / UTC-4 summer)                                                                         
+     - The hours UTC 00:00–13:00 and 21:00–23:59 include pre-market, after-hours, and overnight trading — not just regular session.                                                     
+                                                                                                                                                                                        
+     What you're seeing in the data is all trading activity across extended hours (pre-market + regular + after-hours), not just the 9:                                                 
+     30–16:00 ET regular session. That's the expected behavior of list_aggs — it returns every minute that has at least one trade or quote                                              
+     update, 24h/day.                                                                                                                                                                   
+                                                                                                                                                                                        
+     If you want regular market hours only (9:30–16:00 ET), we can filter the timestamps in the script. Would you like me to add that                                                   
+     filter?                                                                                       
