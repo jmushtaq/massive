@@ -9,6 +9,9 @@ Usage:
     python scripts/trades_enrichment_parallel_status.py --year 2010 --aggregate 1H
     python scripts/trades_enrichment_parallel_status.py --year 2010 --watch
         --watch: refresh every 5 seconds (live monitoring)
+
+    python scripts/trades_enrichment_parallel_status.py --year 2010 --kill
+        --kill: kill all running processes (ps aux | grep trades_enrichment_download.py)
 """
 
 import argparse

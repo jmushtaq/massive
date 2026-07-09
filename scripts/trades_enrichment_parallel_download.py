@@ -7,6 +7,8 @@ across them. One ticker per worker at a time — as a worker finishes,
 the next ticker is assigned.
 
 Usage:
+    python scripts/trades_enrichment_parallel_download.py --ohlcv_tickers --year 2010 --spawn 12
+
     python scripts/trades_enrichment_parallel_download.py --tickers_file data/spy_tickers/tickers_combined_unique.csv --year 2010 --spawn 12
 
     python scripts/trades_enrichment_parallel_download.py \\
