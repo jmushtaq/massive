@@ -2,8 +2,9 @@
 Parallel dispatcher for trades_enrichment_download.py.
 
 Spawns N worker subprocesses (each running trades_enrichment_download.py)
-and distributes tickers from a CSV file across them. One ticker per worker
-at a time — as a worker finishes, the next ticker is assigned.
+and distributes tickers from a CSV file or from saved OHLCV filenames
+across them. One ticker per worker at a time — as a worker finishes,
+the next ticker is assigned.
 
 Usage:
     python scripts/trades_enrichment_parallel_download.py --tickers_file data/spy_tickers/tickers_combined_unique.csv --year 2010 --spawn 12
@@ -11,6 +12,9 @@ Usage:
     python scripts/trades_enrichment_parallel_download.py \\
         --tickers_file data/spy_tickers/tickers_combined_unique.csv \\
         --year 2025 --spawn 8 --parquet --resume --logs
+
+    python scripts/trades_enrichment_parallel_download.py \\
+        --ohlcv_tickers --year 2022 --spawn 12 --parquet
 
 State file: data/trades/.parallel_state_<year>_<aggregate>.json
   Records completed, in-progress, and timing metrics per ticker.
@@ -63,8 +67,14 @@ def parse_args():
     parser.add_argument(
         "--tickers_file",
         type=str,
-        required=True,
+        default=None,
         help="Path to CSV with ticker list (header 'ticker')",
+    )
+    parser.add_argument(
+        "--ohlcv_tickers",
+        action="store_true",
+        default=False,
+        help="Derive ticker list from saved OHLCV files in data/SPY/<aggregate>/<year>/",
     )
     parser.add_argument(
         "--year",
@@ -94,6 +104,12 @@ def parse_args():
         default=False,
         help="Save a dispatcher log file (default: False)",
     )
+    parser.add_argument(
+        "--skip_completed",
+        action="store_true",
+        default=True,
+        help="Skip tickers that already have a non-empty output file in the final dir (default: True)",
+    )
     return parser.parse_args()
 
 
@@ -110,6 +126,21 @@ def load_tickers(tickers_file: str) -> list[str]:
     return tickers
 
 
+def load_ohlcv_tickers(year: str, agg: str) -> list[str]:
+    folder = AGGREGATE_MAP[agg][2]
+    src_dir = Path("data") / "SPY" / folder / year
+    if not src_dir.exists():
+        raise SystemExit("Error: OHLCV directory not found: %s" % src_dir)
+    pattern = f"*_{year}_{folder}.csv"
+    tickers = []
+    for f in sorted(src_dir.glob(pattern)):
+        ticker = f.stem.split("_")[0]
+        tickers.append(clean_ticker(ticker))
+    if not tickers:
+        raise SystemExit("Error: no OHLCV files matching '%s' in %s" % (pattern, src_dir))
+    return tickers
+
+
 def output_path(ticker: str, year: str, agg: str, parquet: bool = False) -> Path:
     folder = AGGREGATE_MAP[agg][2]
     ext = "parquet" if parquet else "csv"
@@ -118,6 +149,20 @@ def output_path(ticker: str, year: str, agg: str, parquet: bool = False) -> Path
 
 def tx_key(ticker: str, year: str) -> str:
     return f"{ticker}_{year}"
+
+
+def is_ticker_final(ticker: str, year: str, agg: str, parquet: bool) -> bool:
+    p = output_path(ticker, year, agg, parquet)
+    if not p.exists() or p.stat().st_size == 0:
+        return False
+    if parquet:
+        import pyarrow.parquet as pq
+        try:
+            return pq.ParquetFile(p).metadata.num_rows > 0
+        except Exception:
+            return False
+    with open(p) as f:
+        return sum(1 for _ in f) > 1
 
 
 def load_state(state_path: Path):
@@ -165,7 +210,23 @@ def main():
     state_path = Path("data") / "trades" / f".parallel_state_{year}_{folder}.json"
     state = load_state(state_path)
 
-    all_tickers = load_tickers(args.tickers_file)
+    if args.ohlcv_tickers:
+        all_tickers = load_ohlcv_tickers(year, agg)
+    elif args.tickers_file:
+        all_tickers = load_tickers(args.tickers_file)
+    else:
+        raise SystemExit("Error: specify one of --tickers_file or --ohlcv_tickers")
+
+    if args.skip_completed:
+        pre_filtered = []
+        for t in all_tickers:
+            if is_ticker_final(t, year, agg, args.parquet):
+                continue
+            pre_filtered.append(t)
+        skipped_pre = len(all_tickers) - len(pre_filtered)
+        all_tickers = pre_filtered
+    else:
+        skipped_pre = 0
     state["all_tickers"] = all_tickers
 
     ticker_queue = []
@@ -174,27 +235,15 @@ def main():
         if key in state.get("completed", {}):
             continue
         if args.resume:
-            p = output_path(t, year, agg, args.parquet)
-            if p.exists() and p.stat().st_size > 0:
-                if args.parquet:
-                    import pyarrow.parquet as pq
-                    try:
-                        reader = pq.ParquetFile(p)
-                        if reader.metadata.num_rows > 0:
-                            continue
-                    except Exception:
-                        pass
-                else:
-                    with open(p) as f:
-                        if sum(1 for _ in f) > 1:
-                            continue
+            if is_ticker_final(t, year, agg, args.parquet):
+                continue
         if key in state.get("in_progress", {}):
             continue
         ticker_queue.append(t)
 
     total = len(all_tickers)
     remaining = len(ticker_queue)
-    completed_count = total - remaining
+    completed_count = total - remaining + skipped_pre
 
     log_lines: list[str] = []
 
@@ -213,6 +262,7 @@ def main():
         log_path = log_dir / f"parallel_{year}_{folder}_{log_ts}.log"
         log_fh = open(log_path, "w")
 
+    ticker_source = "ohlcv_tickers" if args.ohlcv_tickers else args.tickers_file
     log("=" * 60)
     log("PARALLEL TRADE ENRICHMENT DOWNLOAD")
     log("  Workers:      %d" % args.spawn)
@@ -223,6 +273,8 @@ def main():
     log("  Logs:         %s" % ("enabled" if args.logs else "disabled"))
     if args.logs:
         log("  Log path:     %s" % log_path)
+    log("  Ticker src:   %s" % ticker_source)
+    log("  Skip compl:   %s" % args.skip_completed)
     log("  Total:        %d tickers" % total)
     log("  Already done: %d" % completed_count)
     log("  Remaining:    %d" % remaining)

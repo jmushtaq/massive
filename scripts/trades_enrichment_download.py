@@ -154,10 +154,13 @@ def load_tickers(args) -> list[str]:
     return tickers
 
 
-def output_path(ticker: str, year: str, agg: str, parquet: bool = False) -> Path:
+def output_path(ticker: str, year: str, agg: str, parquet: bool = False, subdir: str | None = None) -> Path:
     folder = AGGREGATE_MAP[agg][2]
     ext = "parquet" if parquet else "csv"
-    return Path("data") / "trades" / folder / year / f"{ticker}_{year}_{folder}_trades.{ext}"
+    base = Path("data") / "trades" / folder / year
+    if subdir:
+        base = base / subdir
+    return base / f"{ticker}_{year}_{folder}_trades.{ext}"
 
 
 def is_ticker_complete(ticker: str, year: str, agg: str, parquet: bool = False) -> bool:
@@ -381,7 +384,7 @@ def process_ticker(ticker: str, year: str, agg: str, parquet: bool, client) -> t
     total_rows = 0
     cum_delta = 0.0
 
-    out = output_path(ticker, year, agg, parquet)
+    out = output_path(ticker, year, agg, parquet, subdir="processing")
     out.parent.mkdir(parents=True, exist_ok=True)
 
     for d in trade_dates:
@@ -455,6 +458,11 @@ def main():
             logger.error("[%d/%d] %s -> FAILED after %.1fs: %s", i, len(tickers), ticker, elapsed, e)
             missing.append(ticker)
             results.append({"ticker": ticker, "status": "failed", "error": str(e), "elapsed_s": round(elapsed, 1)})
+            proc_path = output_path(ticker, year, agg, parquet, subdir="processing")
+            if proc_path.exists():
+                err_dir = output_path(ticker, year, agg, parquet, subdir="errors").parent
+                err_dir.mkdir(parents=True, exist_ok=True)
+                proc_path.rename(err_dir / proc_path.name)
             continue
 
         elapsed = time.time() - t0
@@ -463,9 +471,17 @@ def main():
             logger.warning("[%d/%d] %s -> no trade data (%.1fs)", i, len(tickers), ticker, elapsed)
             missing.append(ticker)
             results.append({"ticker": ticker, "status": "no_data", "elapsed_s": round(elapsed, 1)})
+            proc_path = output_path(ticker, year, agg, parquet, subdir="processing")
+            if proc_path.exists():
+                err_dir = output_path(ticker, year, agg, parquet, subdir="errors").parent
+                err_dir.mkdir(parents=True, exist_ok=True)
+                proc_path.rename(err_dir / proc_path.name)
             continue
 
         out = output_path(ticker, year, agg, parquet)
+        proc_path = output_path(ticker, year, agg, parquet, subdir="processing")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        proc_path.rename(out)
         size = out.stat().st_size
         logger.info(
             "[%d/%d] %s -> %d %s bars (%s, %.1fs) -> %s",
