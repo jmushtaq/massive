@@ -90,17 +90,21 @@ def parse_args():
     return parser.parse_args()
 
 
+def clean_ticker(raw: str) -> str:
+    return raw.strip().upper().split("-")[0]
+
+
 def load_tickers(args) -> list[str]:
     tickers = []
     if args.tickers:
-        tickers.extend(t.strip().upper() for t in args.tickers.split(",") if t.strip())
+        tickers.extend(clean_ticker(t) for t in args.tickers.split(",") if t.strip())
     if args.tickers_file:
         with open(args.tickers_file) as f:
             reader = csv.DictReader(f)
             for row in reader:
                 t = row.get("ticker", "").strip()
                 if t:
-                    tickers.append(t)
+                    tickers.append(clean_ticker(t))
     if not tickers:
         raise SystemExit("Error: specify at least one of --tickers or --tickers_file")
     return tickers

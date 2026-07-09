@@ -89,6 +89,10 @@ CSV_HEADERS = [
 NANOS_PER_MINUTE = 60_000_000_000
 
 
+def clean_ticker(raw: str) -> str:
+    return raw.strip().upper().split("-")[0]
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Download trade data and compute enriched aggregates from Massive API"
@@ -125,20 +129,26 @@ def parse_args():
         action="store_true",
         help="Write output as Parquet instead of CSV",
     )
+    parser.add_argument(
+        "--logs",
+        action="store_true",
+        default=False,
+        help="Save detailed per-ticker log files (default: False)",
+    )
     return parser.parse_args()
 
 
 def load_tickers(args) -> list[str]:
     tickers = []
     if args.tickers:
-        tickers.extend(t.strip().upper() for t in args.tickers.split(",") if t.strip())
+        tickers.extend(clean_ticker(t) for t in args.tickers.split(",") if t.strip())
     if args.tickers_file:
         with open(args.tickers_file) as f:
             reader = csv.DictReader(f)
             for row in reader:
                 t = row.get("ticker", "").strip()
                 if t:
-                    tickers.append(t)
+                    tickers.append(clean_ticker(t))
     if not tickers:
         raise SystemExit("Error: specify at least one of --tickers or --tickers_file")
     return tickers
@@ -393,34 +403,43 @@ def main():
     parquet = args.parquet
     folder = AGGREGATE_MAP[agg][2]
 
-    log_dir = Path("data") / "trades" / folder / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
     output_base = Path("data") / "trades" / folder
     log_ts = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
-    log_path = log_dir / f"{SCRIPT_NAME}_{log_ts}.log"
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[
-            logging.FileHandler(log_path),
-            logging.StreamHandler(sys.stdout),
-        ],
-    )
+    stream_handler = logging.StreamHandler(sys.stderr)
+    stream_handler.setLevel(logging.INFO)
+    log_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    stream_handler.setFormatter(log_formatter)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(stream_handler)
     logger = logging.getLogger(SCRIPT_NAME)
 
-    logger.info("Downloading trade enrichment for %d tickers, year=%s, aggregate=%s", len(tickers), year, agg)
-    logger.info("Output format: %s", "parquet" if parquet else "csv")
-    logger.info("Resume mode: %s", args.resume)
-    logger.info("Output base: %s", output_base.resolve())
-
-    client = RESTClient(trace=True)
+    client = RESTClient(trace=False)
 
     missing: list[str] = []
     results: list[dict] = []
     downloaded = 0
+    log_fh = None
 
     for i, ticker in enumerate(tickers, 1):
+        if args.logs:
+            log_dir = Path("data") / "trades" / folder / year / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / f"{SCRIPT_NAME}_{ticker}.log"
+            if log_fh:
+                log_fh.close()
+            for h in list(logger.handlers):
+                if isinstance(h, logging.FileHandler):
+                    h.close()
+                    logger.removeHandler(h)
+            log_fh = open(log_path, "w")
+            fh = logging.FileHandler(log_path)
+            fh.setFormatter(log_formatter)
+            logger.addHandler(fh)
+            logger.info("Logging to %s", log_path)
+
         if args.resume and is_ticker_complete(ticker, year, agg, parquet):
             logger.info("[%d/%d] %s -> already complete, skipping", i, len(tickers), ticker)
             results.append({"ticker": ticker, "status": "skipped"})
@@ -474,15 +493,21 @@ def main():
         "results": results,
     }
 
-    report_path = log_dir / f"{SCRIPT_NAME}_{log_ts}_report.json"
-    with open(report_path, "w") as f:
-        json.dump(summary, f, indent=2)
+    if log_fh:
+        log_fh.close()
+
+    for h in list(logger.handlers):
+        if isinstance(h, logging.FileHandler):
+            logger.removeHandler(h)
 
     logger.info("=" * 60)
     logger.info("SUMMARY REPORT")
     logger.info("  Aggregate:      %s", agg)
     logger.info("  Duration:       %.1fs", total_time)
     logger.info("  Downloaded:     %d", downloaded)
+    no_data_count = len([r for r in results if r["status"] == "no_data"])
+    if no_data_count:
+        logger.info("  No data:        %d", no_data_count)
     skips = len([r for r in results if r["status"] == "skipped"])
     if skips:
         logger.info("  Skipped:        %d", skips)
@@ -490,7 +515,16 @@ def main():
     missing_unique = sorted(set(missing))
     if missing_unique:
         logger.info("  Missing tickers: %s", ", ".join(missing_unique))
-    logger.info("  Report:         %s", report_path)
+
+    # Machine-readable status marker for parallel dispatcher
+    if len(tickers) == 1:
+        status = "no_data" if results and results[0]["status"] == "no_data" else \
+                 "skipped" if results and results[0]["status"] == "skipped" else \
+                 "failed" if results and results[0]["status"] == "failed" else \
+                 "ok" if results else "unknown"
+    else:
+        status = "ok" if downloaded > 0 else "no_data" if any(r["status"] == "no_data" for r in results) else "unknown"
+    print("PARALLEL_RESULT:{\"status\": \"%s\", \"downloaded\": %d}" % (status, downloaded), flush=True)
 
 
 if __name__ == "__main__":
