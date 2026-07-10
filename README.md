@@ -6,7 +6,7 @@ python scripts/stocks_aggs_download.py --tickers_file data/spy_tickers/tickers_c
 ```
 
 
-## Download Stock OHLCV Data
+## Download Stock Fundamentals and Reference Data
 ```
 python scripts/fundamentals_download.py --tickers_file data/spy_tickers/tickers_combined_unique.csv
 python scripts/financial_statements_download.py --tickers_file data/spy_tickers/tickers_combined_unique.csv
@@ -29,7 +29,7 @@ drwxrwxr-x  3 ubuntu ubuntu  4096 Jul  7 17:54 trades_raw/
 
 ```
 
-## Download Stock OHLCV Data
+## Download Stock Trades Data
 ```
 # Individual
 python scripts/trades_enrichment_download.py --tickers AAPL,NVDA --year 2025
@@ -44,4 +44,9 @@ python scripts/trades_enrichment_parallel_status.py --year 2010 --watch
 
 python scripts/trades_enrichment_parallel_status.py --year 2010 --kill
     --kill: kill all running processes (ps aux | grep trades_enrichment_download.py)
+```
+
+## Download Stock Quotes Data
+```
+python scripts/quotes_download.py --tickers NVDA --year 2025
 ```
