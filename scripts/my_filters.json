@@ -1,0 +1,10 @@
+{
+  "market_cap": {"min": 2e9, "max": 6e9},
+  "price": {"min": 10, "max": 15},
+  "volume": {"min": 1.5e6, "max": 3.5e6},
+  "rvol": {"min": 1.0, "max": 1.5},
+  #"sector_keywords": ["TECHNOLOGY", "SEMICONDUCTORS"],
+  #"exchange": "XNAS",
+  "active": true
+}
+
