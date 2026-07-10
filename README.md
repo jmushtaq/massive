@@ -33,6 +33,7 @@ drwxrwxr-x  3 ubuntu ubuntu  4096 Jul  7 17:54 trades_raw/
 ```
 # Individual
 python scripts/trades_enrichment_download.py --tickers AAPL,NVDA --year 2025
+python scripts/trades_enrichment_download.py --tickers TWTR --year 2022 --aggregate 1min --logs
 
 # Parallel
 python scripts/trades_enrichment_parallel_download.py --ohlcv_tickers --year 2010 --spawn 12
