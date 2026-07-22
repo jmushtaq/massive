@@ -1,17 +1,17 @@
 """
-Display live status of a running or completed parallel quote enrichment run.
+Display live status of a running or completed parallel stock aggregate download.
 
-Reads the state file written by quotes_parallel_download.py.
+Reads the state file written by stocks_aggs_parallel_download.py.
 
 Usage:
-    python scripts/quotes_parallel_status.py
-    python scripts/quotes_parallel_status.py --year 2010
-    python scripts/quotes_parallel_status.py --year 2010 --aggregate 1H
-    python scripts/quotes_parallel_status.py --year 2010 --watch
+    python scripts/stocks_aggs_parallel_status.py
+    python scripts/stocks_aggs_parallel_status.py --year 2010
+    python scripts/stocks_aggs_parallel_status.py --year 2010 --aggregate 1H
+    python scripts/stocks_aggs_parallel_status.py --year 2010 --watch
         --watch: refresh every 5 seconds (live monitoring)
 
-    python scripts/quotes_parallel_status.py --year 2010 --kill
-        --kill: kill all running processes (ps aux | grep quotes_download.py)
+    python scripts/stocks_aggs_parallel_status.py --year 2010 --kill
+        --kill: kill all running processes
 """
 
 import argparse
@@ -34,7 +34,7 @@ AGGREGATE_MAP = {
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Show status of parallel quote enrichment downloads"
+        description="Show status of parallel stock aggregate downloads"
     )
     parser.add_argument(
         "--year",
@@ -58,6 +58,12 @@ def parse_args():
         action="store_true",
         help="Kill all running workers and the dispatcher process",
     )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Base output directory where state file lives (e.g. data/combined).",
+    )
     return parser.parse_args()
 
 
@@ -71,9 +77,6 @@ def fmt_duration(s: float) -> str:
     h = m // 60
     m = m % 60
     return "%dh %02dm" % (h, m)
-
-
-TRADING_DAYS_PER_YEAR = 252
 
 
 def show_status(state_path: Path):
@@ -118,11 +121,6 @@ def show_status(state_path: Path):
     eta_s = (remaining / (done / elapsed)) if done > 0 and elapsed > 0 else 0
 
     workers = config.get("workers", 0)
-    delay = config.get("delay", 0.1)
-
-    api_calls = completed_ok * TRADING_DAYS_PER_YEAR
-    req_sec = api_calls / elapsed if elapsed > 0 else 0
-    req_sec_per_worker = req_sec / workers if workers > 0 else 0
 
     print("  State file:   %s" % state_path.name)
     print("  Total:        %d" % total)
@@ -133,22 +131,12 @@ def show_status(state_path: Path):
     print("  Running:      %d" % running)
     print("  Remaining:    %d" % remaining)
     if workers:
-        print("  Workers:      %d (delay %.2fs)" % (workers, delay))
+        print("  Workers:      %d" % workers)
     print()
     print("  Elapsed:      %s" % fmt_duration(elapsed))
     if done > 0:
         print("  Throughput:   %.0f tickers/hr" % throughput)
         print("  Est. finish:  %s" % fmt_duration(eta_s))
-    print("  Req/sec:      ~%.0f (%.1f per worker)" % (req_sec, req_sec_per_worker))
-    if workers > 0:
-        if req_sec_per_worker < 3:
-            print("  Hint:         Workers idle — increase --spawn to improve throughput")
-        elif req_sec_per_worker < 5:
-            print("  Hint:         Moderate load — increase --spawn or lower --delay")
-        elif req_sec_per_worker <= 6:
-            print("  Hint:         Good throughput — workers near API-bound limit")
-        else:
-            print("  Hint:         High per-worker rate — reduce --spawn or raise --delay")
 
     if stats:
         if "data_avg_time_s" in stats:
@@ -232,24 +220,24 @@ def kill_workers(state_path: Path):
 def main():
     args = parse_args()
 
-    data_dir = Path("data") / "quotes"
-    pattern = ".parallel_state_"
-    if args.year:
-        pattern += args.year
-    if args.aggregate:
-        pattern += "_" + AGGREGATE_MAP[args.aggregate]
-    else:
-        pattern += "*"
-
-    state_files = sorted(data_dir.glob(pattern + ".json"))
+    search_dirs = [Path("data"), Path("data") / "SPY"]
+    if args.output:
+        search_dirs.insert(0, Path(args.output))
+    state_files = []
+    for data_dir in search_dirs:
+        pattern = ".parallel_state_"
+        if args.year:
+            pattern += args.year
+        if args.aggregate:
+            pattern += "_" + AGGREGATE_MAP[args.aggregate]
+        else:
+            pattern += "*"
+        state_files.extend(data_dir.glob(pattern + ".json"))
+    state_files = sorted(set(state_files))
 
     if not state_files:
-        print("No matching state files found in %s" % data_dir)
-        available = list(data_dir.glob(".parallel_state_*.json"))
-        if available:
-            print("Available state files:")
-            for sf in available:
-                print("  %s" % sf.name)
+        dirs_str = ", ".join(str(d) for d in search_dirs)
+        print("No matching state files found in " + dirs_str)
         sys.exit(1)
 
     if args.kill:

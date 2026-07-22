@@ -7,7 +7,7 @@ across them. One ticker per worker at a time — as a worker finishes,
 the next ticker is assigned.
 
 Usage:
-    python scripts/trades_enrichment_parallel_download.py --ohlcv_tickers --year 2010 --spawn 12
+    python scripts/trades_enrichment_parallel_download.py --ohlcv_tickers --year 2010 --spawn 50 --delay 1.0
 
     python scripts/trades_enrichment_parallel_download.py --tickers_file data/spy_tickers/tickers_combined_unique.csv --year 2010 --spawn 12
 
@@ -56,6 +56,22 @@ def clean_ticker(raw: str) -> str:
     return raw.strip().upper().split("-")[0]
 
 
+def parse_years(year_arg: str) -> list[str]:
+    parts = year_arg.split("-")
+    if len(parts) == 1:
+        y = parts[0].strip()
+        if not y.isdigit():
+            raise SystemExit("Error: invalid year '%s'" % year_arg)
+        return [y]
+    elif len(parts) == 2:
+        start, end = parts[0].strip(), parts[1].strip()
+        if not start.isdigit() or not end.isdigit():
+            raise SystemExit("Error: invalid year range '%s'" % year_arg)
+        return [str(y) for y in range(int(start), int(end) + 1)]
+    else:
+        raise SystemExit("Error: invalid year format '%s' (use YYYY or YYYY-YYYY)" % year_arg)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Parallel download trade enrichment data using multiple worker processes"
@@ -96,6 +112,12 @@ def parse_args():
         help="Skip tickers that already have a non-empty output file",
     )
     parser.add_argument(
+        "--smart_resume",
+        action="store_true",
+        default=False,
+        help="For each ticker, read its processing file and start from the day after its last row",
+    )
+    parser.add_argument(
         "--parquet",
         action="store_true",
         help="Write output as Parquet instead of CSV",
@@ -111,6 +133,18 @@ def parse_args():
         action="store_true",
         default=True,
         help="Skip tickers that already have a non-empty output file in the final dir (default: True)",
+    )
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=0.1,
+        help="Seconds each worker sleeps after each trading day's fetch (default: 0.1)",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Base output directory passed to workers via --output (default: data/)",
     )
     return parser.parse_args()
 
@@ -174,6 +208,34 @@ def load_state(state_path: Path):
     return {"completed": {}, "in_progress": {}, "all_tickers": [], "stats": {}}
 
 
+def processing_path(ticker: str, year: str, agg: str, parquet: bool = False) -> Path:
+    folder = AGGREGATE_MAP[agg][2]
+    ext = "parquet" if parquet else "csv"
+    return Path("data") / "trades" / folder / year / "processing" / f"{ticker}_{year}_{folder}_trades.{ext}"
+
+
+def last_row_date(ticker: str, year: str, agg: str, parquet: bool) -> str | None:
+    path = processing_path(ticker, year, agg, parquet)
+    if not path.exists() or path.stat().st_size == 0:
+        return None
+    with open(path) as f:
+        last_line = None
+        for line in f:
+            line = line.strip()
+            if line:
+                last_line = line
+    if not last_line:
+        return None
+    parts = last_line.split(",")
+    if len(parts) < 2:
+        return None
+    try:
+        ts = datetime.datetime.fromisoformat(parts[1])
+        return ts.date().isoformat()
+    except (ValueError, IndexError):
+        return None
+
+
 def save_state(state_path: Path, state: dict):
     state_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = state_path.with_suffix(".tmp")
@@ -202,12 +264,9 @@ def parse_worker_status(proc, ret: int) -> str:
     return "ok"
 
 
-def main():
-    args = parse_args()
-    overall_start = time.time()
-    agg = args.aggregate
-    year = args.year
+def run_year(agg: str, year: str, args, overall_start: float) -> dict:
     folder = AGGREGATE_MAP[agg][2]
+    year_start = time.time()
 
     state_path = Path("data") / "trades" / f".parallel_state_{year}_{folder}.json"
     state = load_state(state_path)
@@ -264,11 +323,12 @@ def main():
         log_path = log_dir / f"parallel_{year}_{folder}_{log_ts}.log"
         log_fh = open(log_path, "w")
 
+    state["config"] = {"workers": args.spawn, "delay": args.delay, "aggregate": agg, "year": year}
     ticker_source = "ohlcv_tickers" if args.ohlcv_tickers else args.tickers_file
     log("=" * 60)
-    log("PARALLEL TRADE ENRICHMENT DOWNLOAD")
+    log("PARALLEL TRADE ENRICHMENT DOWNLOAD  [year %s]" % year)
     log("  Workers:      %d" % args.spawn)
-    log("  Year:         %s" % year)
+    log("  Delay:        %.2fs" % args.delay)
     log("  Aggregate:    %s" % agg)
     log("  Format:       %s" % ("parquet" if args.parquet else "csv"))
     log("  Resume:       %s" % args.resume)
@@ -277,6 +337,8 @@ def main():
         log("  Log path:     %s" % log_path)
     log("  Ticker src:   %s" % ticker_source)
     log("  Skip compl:   %s" % args.skip_completed)
+    if args.output:
+        log("  Output base:  %s" % args.output)
     log("  Total:        %d tickers" % total)
     log("  Already done: %d" % completed_count)
     log("  Remaining:    %d" % remaining)
@@ -284,8 +346,10 @@ def main():
     log("=" * 60)
 
     if remaining == 0:
-        log("All tickers already processed. Nothing to do.")
-        return
+        log("All tickers for %s already processed. Nothing to do." % year)
+        if log_fh:
+            log_fh.close()
+        return {"year": year, "total": total, "completed": 0, "successful": 0, "no_data": 0, "failed": 0, "elapsed_s": 0, "skipped": True}
 
     state["in_progress"] = {}
     save_state(state_path, state)
@@ -310,8 +374,15 @@ def main():
             cmd.append("--parquet")
         if args.resume:
             cmd.append("--resume")
+        if args.smart_resume:
+            start_from = last_row_date(ticker, year, agg, args.parquet)
+            if start_from:
+                cmd.extend(["--start_date", start_from])
         if args.logs:
             cmd.append("--logs")
+        if args.output:
+            cmd.extend(["--output", args.output])
+        cmd.extend(["--delay", str(args.delay)])
         try:
             stderr_file = open(f"/tmp/worker_{ticker}_{year}.log", "w")
             proc = subprocess.Popen(
@@ -391,9 +462,8 @@ def main():
         log("All workers terminated.")
         sys.exit(130)
 
-    elapsed = time.time() - overall_start
+    year_elapsed = time.time() - year_start
 
-    # Separate timing stats: exclude no_data tickers
     completed_ok = [k for k, v in state["completed"].items() if v.get("status") == "ok"]
     completed_no_data = [k for k, v in state["completed"].items() if v.get("status") == "no_data"]
     completed_fail = [k for k, v in state["completed"].items() if v.get("status") == "failed"]
@@ -407,7 +477,7 @@ def main():
         "successful": len(completed_ok),
         "no_data": len(completed_no_data),
         "failed": len(completed_fail),
-        "elapsed_s": round(elapsed, 1),
+        "elapsed_s": round(year_elapsed, 1),
     }
     if data_durations:
         stats["data_avg_time_s"] = round(sum(data_durations) / len(data_durations), 1)
@@ -421,12 +491,12 @@ def main():
     save_state(state_path, state)
 
     log("=" * 60)
-    log("SUMMARY")
+    log("SUMMARY  [year %s]" % year)
     log("  Total:        %d" % total)
     log("  Successful:   %d" % len(completed_ok))
     log("  No data:      %d" % len(completed_no_data))
     log("  Failed:       %d" % len(completed_fail))
-    log("  Duration:     %.1fs" % elapsed)
+    log("  Duration:     %.1fs" % year_elapsed)
     if data_durations:
         log("  Avg/ticker (with data):   %.1fs" % stats["data_avg_time_s"])
         log("  Min/ticker (with data):   %.1fs" % stats["data_min_time_s"])
@@ -443,7 +513,6 @@ def main():
     if log_fh:
         log_fh.close()
 
-    # Write report always
     log_ts = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
     report = {
         "script": "trades_enrichment_parallel_download",
@@ -458,7 +527,7 @@ def main():
         "successful": len(completed_ok),
         "no_data": len(completed_no_data),
         "failed": len(completed_fail),
-        "duration_s": round(elapsed, 1),
+        "duration_s": round(year_elapsed, 1),
         "completed": state["completed"],
         "stats": stats,
     }
@@ -468,6 +537,43 @@ def main():
     with open(report_path, "w") as f:
         json.dump(report, f, indent=2)
     print("  Report:       %s" % report_path)
+
+    return {
+        "year": year,
+        "total": total,
+        "completed": len(completed_ok) + len(completed_no_data) + len(completed_fail),
+        "successful": len(completed_ok),
+        "no_data": len(completed_no_data),
+        "failed": len(completed_fail),
+        "elapsed_s": round(year_elapsed, 1),
+        "skipped": False,
+    }
+
+
+def main():
+    args = parse_args()
+    overall_start = time.time()
+    agg = args.aggregate
+    years = parse_years(args.year)
+
+    all_year_results = []
+    for year in years:
+        result = run_year(agg, year, args, overall_start)
+        all_year_results.append(result)
+
+    total_elapsed = time.time() - overall_start
+    total_successful = sum(r["successful"] for r in all_year_results)
+    total_no_data = sum(r["no_data"] for r in all_year_results)
+    total_failed = sum(r["failed"] for r in all_year_results)
+
+    print()
+    print("=" * 60)
+    print("OVERALL SUMMARY (%d year(s): %s)" % (len(years), args.year))
+    print("  Total elapsed:    %s" % datetime.timedelta(seconds=int(total_elapsed)))
+    print("  Successful:       %d" % total_successful)
+    print("  No data:          %d" % total_no_data)
+    print("  Failed:           %d" % total_failed)
+    print("=" * 60)
 
 
 if __name__ == "__main__":

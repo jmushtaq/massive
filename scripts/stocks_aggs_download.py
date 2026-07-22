@@ -2,15 +2,21 @@
 Download aggregate bar data for a list of tickers from the Massive (REST) API
 and save each ticker as a CSV or Parquet file.
 
+Output layout (default):
+    data/SPY/<aggregate>/<year>/<ticker>_<year>_<aggregate>.csv
+
+With --output:
+    <output>/SPY/<aggregate>/<year>/<ticker>_<year>_<aggregate>.csv
+
+tickers_file supports columns: ticker,market_cap,rank,date (combined_unique.csv format).
+
 Usage:
     python scripts/stocks_aggs_download.py --tickers AAPL,NVDA,TSLA --year 2025
-    python scripts/stocks_aggs_download.py --tickers_file data/spy_tickers/tickers_combined_unique.csv --year 2025
+    python scripts/stocks_aggs_download.py --tickers_file data/universes/2025/combined_unique.csv --year 2025
     python scripts/stocks_aggs_download.py --tickers AAPL --year 2022-2025 --aggregate 1H --resume
     python scripts/stocks_aggs_download.py --tickers AAPL --year 2025 --parquet
-
-Output layout:
-    data/SPY/<aggregate>/<year>/<ticker>_<year>_<aggregate>.csv
-    data/SPY/<aggregate>/<year>/<ticker>_<year>_<aggregate>.parquet  (with --parquet)
+    python scripts/stocks_aggs_download.py --tickers AAPL --year 2025 --start_date 2025-06-01
+    python scripts/stocks_aggs_download.py --tickers AAPL --year 2025 --output data/combined
 
 Resume behaviour:
     The script checks the output directory for already-saved tickers. If --resume
@@ -92,13 +98,19 @@ def parse_args():
     parser.add_argument(
         "--tickers_file",
         type=str,
-        help="Path to CSV with ticker list (one ticker per row, header 'ticker')",
+        help="Path to CSV with ticker list (header 'ticker'; may also have market_cap,rank columns)",
     )
     parser.add_argument(
         "--year",
         type=str,
         required=True,
         help="Year or year range (e.g. 2025 or 2022-2025)",
+    )
+    parser.add_argument(
+        "--start_date",
+        type=str,
+        default=None,
+        help="Start date YYYY-MM-DD (default: <year>-01-01)",
     )
     parser.add_argument(
         "--resume",
@@ -109,6 +121,12 @@ def parse_args():
         "--parquet",
         action="store_true",
         help="Write output as Parquet instead of CSV",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Base output directory (default: data/). Inferred aggregate/year subdirs are appended.",
     )
     return parser.parse_args()
 
@@ -137,18 +155,22 @@ def agg_params(agg: str):
     return AGGREGATE_MAP[agg]
 
 
-def output_base(agg: str) -> Path:
-    return Path("data") / "SPY" / AGGREGATE_MAP[agg][2]
+def output_base(agg: str, output_dir: str | None = None) -> Path:
+    base = Path(output_dir) if output_dir else Path("data") / "SPY"
+    return base / AGGREGATE_MAP[agg][2]
 
 
-def output_path(ticker: str, year: str, agg: str, parquet: bool = False) -> Path:
+def output_path(ticker: str, year: str, agg: str, parquet: bool = False, output_dir: str | None = None, subdir: str | None = None) -> Path:
     folder = AGGREGATE_MAP[agg][2]
     ext = "parquet" if parquet else "csv"
-    return output_base(agg) / year / f"{ticker}_{year}_{folder}.{ext}"
+    base = output_base(agg, output_dir) / year
+    if subdir:
+        base = base / subdir
+    return base / f"{ticker}_{year}_{folder}.{ext}"
 
 
-def output_rows(ticker: str, year: str, agg: str, parquet: bool) -> int:
-    path = output_path(ticker, year, agg, parquet)
+def output_rows(ticker: str, year: str, agg: str, parquet: bool, output_dir: str | None = None) -> int:
+    path = output_path(ticker, year, agg, parquet, output_dir)
     if not path.exists():
         return 0
     if parquet:
@@ -157,8 +179,17 @@ def output_rows(ticker: str, year: str, agg: str, parquet: bool) -> int:
         return sum(1 for _ in f) - 1
 
 
-def is_ticker_complete(ticker: str, year: str, agg: str, parquet: bool = False) -> bool:
-    return output_rows(ticker, year, agg, parquet) > 0
+def is_ticker_complete(ticker: str, year: str, agg: str, parquet: bool = False, output_dir: str | None = None) -> bool:
+    p = output_path(ticker, year, agg, parquet, output_dir)
+    if not p.exists() or p.stat().st_size == 0:
+        return False
+    if parquet:
+        try:
+            return pq.ParquetFile(p).metadata.num_rows > 0
+        except Exception:
+            return False
+    with open(p) as f:
+        return sum(1 for _ in f) > 1
 
 
 def parse_years(year_arg: str) -> list[str]:
@@ -195,8 +226,8 @@ def build_rows(aggs):
             }
 
 
-def download_ticker(client, ticker: str, year: str, agg: str, parquet: bool = False) -> int:
-    from_date = f"{year}-01-01"
+def download_ticker(client, ticker: str, year: str, agg: str, parquet: bool = False, start_date: str | None = None, output_dir: str | None = None) -> int:
+    from_date = start_date or f"{year}-01-01"
     to_date = f"{year}-12-31"
     multiplier, timespan, _ = agg_params(agg)
 
@@ -216,17 +247,21 @@ def download_ticker(client, ticker: str, year: str, agg: str, parquet: bool = Fa
         return 0
 
     rows = list(build_rows(aggs))
-    out = output_path(ticker, year, agg, parquet)
-    out.parent.mkdir(parents=True, exist_ok=True)
+    proc_path = output_path(ticker, year, agg, parquet, output_dir, subdir="processing")
+    proc_path.parent.mkdir(parents=True, exist_ok=True)
 
     if parquet:
         table = pa.Table.from_pylist(rows)
-        pq.write_table(table, out)
+        pq.write_table(table, proc_path)
     else:
-        with open(out, "w", newline="") as f:
+        with open(proc_path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=CSV_HEADERS)
             writer.writeheader()
             writer.writerows(rows)
+
+    out = output_path(ticker, year, agg, parquet, output_dir)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    proc_path.rename(out)
 
     return len(rows)
 
@@ -262,10 +297,13 @@ def main():
     )
     logger = logging.getLogger(SCRIPT_NAME)
 
+    out_dir = args.output
     logger.info("Starting download for %d tickers, years=%s, aggregate=%s", len(tickers), years, agg)
     logger.info("Output format: %s", "parquet" if args.parquet else "csv")
     logger.info("Resume mode: %s", args.resume)
-    logger.info("Output base: %s", output_base(agg).resolve())
+    if args.start_date:
+        logger.info("Start date: %s", args.start_date)
+    logger.info("Output base: %s", output_base(agg, out_dir).resolve())
 
     client = RESTClient(trace=True)
 
@@ -279,12 +317,12 @@ def main():
         skipped = 0
 
         for i, ticker in enumerate(tickers, 1):
-            if args.resume and is_ticker_complete(ticker, year, agg, args.parquet):
+            if args.resume and is_ticker_complete(ticker, year, agg, args.parquet, out_dir):
                 logger.info("[%d/%d] %s (%s) -> already complete, skipping", i, len(tickers), ticker, year)
                 skipped += 1
                 all_results.append({
                     "ticker": ticker, "year": year, "status": "skipped",
-                    "rows": output_rows(ticker, year, agg, args.parquet),
+                    "rows": output_rows(ticker, year, agg, args.parquet, out_dir),
                 })
                 continue
 
@@ -292,12 +330,17 @@ def main():
 
             t0 = time.time()
             try:
-                count = download_ticker(client, ticker, year, agg, args.parquet)
+                count = download_ticker(client, ticker, year, agg, args.parquet, args.start_date, out_dir)
             except Exception as e:
                 elapsed = time.time() - t0
                 logger.error("[%d/%d] %s (%s) -> FAILED after %.1fs: %s", i, len(tickers), ticker, year, elapsed, e)
                 all_missing.append(ticker)
                 all_results.append({"ticker": ticker, "year": year, "status": "failed", "error": str(e), "elapsed_s": round(elapsed, 1)})
+                proc_path = output_path(ticker, year, agg, args.parquet, out_dir, subdir="processing")
+                if proc_path.exists():
+                    err_dir = output_path(ticker, year, agg, args.parquet, out_dir, subdir="errors").parent
+                    err_dir.mkdir(parents=True, exist_ok=True)
+                    proc_path.rename(err_dir / proc_path.name)
                 continue
 
             elapsed = time.time() - t0
@@ -306,8 +349,13 @@ def main():
                 logger.warning("[%d/%d] %s (%s) -> no data returned (%.1fs)", i, len(tickers), ticker, year, elapsed)
                 all_missing.append(ticker)
                 all_results.append({"ticker": ticker, "year": year, "status": "no_data", "elapsed_s": round(elapsed, 1)})
+                proc_path = output_path(ticker, year, agg, args.parquet, out_dir, subdir="processing")
+                if proc_path.exists():
+                    err_dir = output_path(ticker, year, agg, args.parquet, out_dir, subdir="errors").parent
+                    err_dir.mkdir(parents=True, exist_ok=True)
+                    proc_path.rename(err_dir / proc_path.name)
             else:
-                path = output_path(ticker, year, agg, args.parquet)
+                path = output_path(ticker, year, agg, args.parquet, out_dir)
                 size = path.stat().st_size
                 logger.info(
                     "[%d/%d] %s (%s) -> %d bars (%s, %.1fs) -> %s",
@@ -319,6 +367,7 @@ def main():
                     "rows": count, "size_bytes": size, "path": str(path),
                     "elapsed_s": round(elapsed, 1),
                 })
+                logger.info("PARALLEL_RESULT:{\"ticker\":\"%s\",\"year\":\"%s\",\"status\":\"ok\",\"rows\":%d}", ticker, year, count)
 
             time.sleep(0.25)
 

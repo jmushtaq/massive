@@ -48,5 +48,26 @@ python scripts/trades_enrichment_parallel_status.py --year 2010 --kill
 
 ## Download Stock Quotes Data
 ```
+python scripts/quotes_parallel_download.py --ohlcv_tickers --year 2025 --spawn 100 --logs --delay 1.1
+
 python scripts/quotes_download.py --tickers NVDA --year 2025
+```
+
+## Resuming execution
+```
+# collect together all missing tickers
+python scripts/find_missing_tickers.py --reference data/SPY/1min/2022 --target data/quotes/1min/2022 --output /tmp/missing_2022_tickers.txt
+Wrote 248 missing tickers to /tmp/missing_2022_tickers.txt
+
+@ clear the state
+rm data/quotes/.parallel_state_2022_1min.json
+
+# Run tickers (re-running from where scripts died/failed)
+python scripts/quotes_parallel_download.py --tickers_file /tmp/missing_2022_tickers.txt --year 2022 --spawn 100 --smart_resume --resume &
+
+# Monitor
+
+python scripts/quotes_parallel_status.py --year 2022 --watch
+
+tail -f data/quotes/1min/2022/processing/AAPL_2022_1min_quotes.csv
 ```

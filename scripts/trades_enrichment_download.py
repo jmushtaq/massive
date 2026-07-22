@@ -120,6 +120,18 @@ def parse_args():
         help="Year to download (default: current year)",
     )
     parser.add_argument(
+        "--start_date",
+        type=str,
+        default=None,
+        help="Start from this date instead of Jan 1 (YYYY-MM-DD). Useful for resuming partial downloads.",
+    )
+    parser.add_argument(
+        "--smart_resume",
+        action="store_true",
+        default=False,
+        help="Read each ticker's processing file and start from the day after its last row.",
+    )
+    parser.add_argument(
         "--resume",
         action="store_true",
         help="Skip tickers that already have a non-empty output file",
@@ -134,6 +146,18 @@ def parse_args():
         action="store_true",
         default=False,
         help="Save detailed per-ticker log files (default: False)",
+    )
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=0.1,
+        help="Seconds to sleep after each trading day's fetch (default: 0.1)",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Base output directory (default: data/). Inferred aggregate/year subdirs are appended.",
     )
     return parser.parse_args()
 
@@ -154,17 +178,17 @@ def load_tickers(args) -> list[str]:
     return tickers
 
 
-def output_path(ticker: str, year: str, agg: str, parquet: bool = False, subdir: str | None = None) -> Path:
+def output_path(ticker: str, year: str, agg: str, parquet: bool = False, subdir: str | None = None, output_dir: str | None = None) -> Path:
     folder = AGGREGATE_MAP[agg][2]
     ext = "parquet" if parquet else "csv"
-    base = Path("data") / "trades" / folder / year
+    base = (Path(output_dir) if output_dir else Path("data")) / "trades" / folder / year
     if subdir:
         base = base / subdir
     return base / f"{ticker}_{year}_{folder}_trades.{ext}"
 
 
-def is_ticker_complete(ticker: str, year: str, agg: str, parquet: bool = False) -> bool:
-    path = output_path(ticker, year, agg, parquet)
+def is_ticker_complete(ticker: str, year: str, agg: str, parquet: bool = False, output_dir: str | None = None) -> bool:
+    path = output_path(ticker, year, agg, parquet, output_dir=output_dir)
     if not path.exists() or path.stat().st_size == 0:
         return False
     if parquet:
@@ -202,6 +226,28 @@ def fmt_bytes(size: int) -> str:
     return f"{size:.1f}GB"
 
 
+def last_row_date(ticker: str, year: str, agg: str, output_dir: str | None = None) -> str | None:
+    path = output_path(ticker, year, agg, subdir="processing", output_dir=output_dir)
+    if not path.exists() or path.stat().st_size == 0:
+        return None
+    with open(path) as f:
+        last_line = None
+        for line in f:
+            line = line.strip()
+            if line:
+                last_line = line
+    if not last_line:
+        return None
+    parts = last_line.split(",")
+    if len(parts) < 2:
+        return None
+    try:
+        ts = datetime.datetime.fromisoformat(parts[1])
+        return ts.date().isoformat()
+    except (ValueError, IndexError):
+        return None
+
+
 def _append_rows(path: Path, rows: list[dict], parquet: bool) -> None:
     if parquet:
         existing = pq.read_table(path) if path.exists() else None
@@ -220,7 +266,7 @@ def _append_rows(path: Path, rows: list[dict], parquet: bool) -> None:
             writer.writerows(rows)
 
 
-def process_day(ticker: str, day: datetime.date, client, cum_delta: float) -> tuple[list[dict], float]:
+def process_day(ticker: str, day: datetime.date, client, cum_delta: float, delay: float = 0.1) -> tuple[list[dict], float]:
     bucket: dict[int, list] = defaultdict(list)
 
     date_str = day.isoformat()
@@ -232,7 +278,7 @@ def process_day(ticker: str, day: datetime.date, client, cum_delta: float) -> tu
                 )
     except Exception:
         return [], cum_delta
-    time.sleep(0.1)
+    time.sleep(delay)
 
     if not bucket:
         return [], cum_delta
@@ -378,17 +424,20 @@ def rollup_rows(rows: list[dict], multiplier: int, timespan: str) -> list[dict]:
     return rolled
 
 
-def process_ticker(ticker: str, year: str, agg: str, parquet: bool, client) -> tuple[int, int]:
+def process_ticker(ticker: str, year: str, agg: str, parquet: bool, client, delay: float = 0.1, start_date: str | None = None, output_dir: str | None = None) -> tuple[int, int]:
     multiplier, timespan, _ = AGGREGATE_MAP[agg]
     trade_dates = list(trading_days(year))
+    if start_date:
+        start = datetime.date.fromisoformat(start_date)
+        trade_dates = [d for d in trade_dates if d >= start]
     total_rows = 0
     cum_delta = 0.0
 
-    out = output_path(ticker, year, agg, parquet, subdir="processing")
+    out = output_path(ticker, year, agg, parquet, subdir="processing", output_dir=output_dir)
     out.parent.mkdir(parents=True, exist_ok=True)
 
     for d in trade_dates:
-        day_rows, cum_delta = process_day(ticker, d, client, cum_delta)
+        day_rows, cum_delta = process_day(ticker, d, client, cum_delta, delay=delay)
         if day_rows:
             rolled = rollup_rows(day_rows, multiplier, timespan)
             _append_rows(out, rolled, parquet)
@@ -406,7 +455,8 @@ def main():
     parquet = args.parquet
     folder = AGGREGATE_MAP[agg][2]
 
-    output_base = Path("data") / "trades" / folder
+    output_dir = args.output
+    output_base = (Path(output_dir) if output_dir else Path("data")) / "trades" / folder
     log_ts = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
 
     stream_handler = logging.StreamHandler(sys.stderr)
@@ -443,7 +493,18 @@ def main():
             logger.addHandler(fh)
             logger.info("Logging to %s", log_path)
 
-        if args.resume and is_ticker_complete(ticker, year, agg, parquet):
+        if args.smart_resume:
+            last_date = last_row_date(ticker, year, agg, output_dir)
+            if last_date:
+                ticker_start = last_date
+                logger.info("[%d/%d] %s -> smart-resuming from %s", i, len(tickers), ticker, ticker_start)
+            else:
+                logger.info("[%d/%d] %s -> no partial data found, starting from Jan 1", i, len(tickers), ticker)
+                ticker_start = None
+        else:
+            ticker_start = args.start_date
+
+        if args.resume and is_ticker_complete(ticker, year, agg, parquet, output_dir):
             logger.info("[%d/%d] %s -> already complete, skipping", i, len(tickers), ticker)
             results.append({"ticker": ticker, "status": "skipped"})
             continue
@@ -452,15 +513,15 @@ def main():
         t0 = time.time()
 
         try:
-            total_rows, _ = process_ticker(ticker, year, agg, parquet, client)
+            total_rows, _ = process_ticker(ticker, year, agg, parquet, client, delay=args.delay, start_date=ticker_start, output_dir=output_dir)
         except Exception as e:
             elapsed = time.time() - t0
             logger.error("[%d/%d] %s -> FAILED after %.1fs: %s", i, len(tickers), ticker, elapsed, e)
             missing.append(ticker)
             results.append({"ticker": ticker, "status": "failed", "error": str(e), "elapsed_s": round(elapsed, 1)})
-            proc_path = output_path(ticker, year, agg, parquet, subdir="processing")
+            proc_path = output_path(ticker, year, agg, parquet, subdir="processing", output_dir=output_dir)
             if proc_path.exists():
-                err_dir = output_path(ticker, year, agg, parquet, subdir="errors").parent
+                err_dir = output_path(ticker, year, agg, parquet, subdir="errors", output_dir=output_dir).parent
                 err_dir.mkdir(parents=True, exist_ok=True)
                 proc_path.rename(err_dir / proc_path.name)
             continue
@@ -471,15 +532,15 @@ def main():
             logger.warning("[%d/%d] %s -> no trade data (%.1fs)", i, len(tickers), ticker, elapsed)
             missing.append(ticker)
             results.append({"ticker": ticker, "status": "no_data", "elapsed_s": round(elapsed, 1)})
-            proc_path = output_path(ticker, year, agg, parquet, subdir="processing")
+            proc_path = output_path(ticker, year, agg, parquet, subdir="processing", output_dir=output_dir)
             if proc_path.exists():
-                err_dir = output_path(ticker, year, agg, parquet, subdir="errors").parent
+                err_dir = output_path(ticker, year, agg, parquet, subdir="errors", output_dir=output_dir).parent
                 err_dir.mkdir(parents=True, exist_ok=True)
                 proc_path.rename(err_dir / proc_path.name)
             continue
 
-        out = output_path(ticker, year, agg, parquet)
-        proc_path = output_path(ticker, year, agg, parquet, subdir="processing")
+        out = output_path(ticker, year, agg, parquet, output_dir=output_dir)
+        proc_path = output_path(ticker, year, agg, parquet, subdir="processing", output_dir=output_dir)
         out.parent.mkdir(parents=True, exist_ok=True)
         proc_path.rename(out)
         size = out.stat().st_size

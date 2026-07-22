@@ -1,31 +1,22 @@
 """
-Parallel dispatcher for quotes_download.py.
+Parallel dispatcher for stocks_aggs_download.py.
 
-Spawns N worker subprocesses (each running quotes_download.py)
+Spawns N worker subprocesses (each running stocks_aggs_download.py)
 and distributes tickers from a CSV file or from saved OHLCV filenames
-across them. One ticker per worker at a time — as a worker finishes,
-the next ticker is assigned.
+across them. One ticker per worker at a time.
 
-save tickers from dir
-{ echo "ticker"; ls data/quotes/1min/2024/processing/ | cut -d'_' -f1; } > /tmp/processing_2024_tickers.csv
-
-python scripts/quotes_parallel_download.py --tickers_file /tmp/processing_2024_tickers.csv --year 2024 --spawn 20 --smart_resume --resume --delay 1.1
+State file: data/SPY/.parallel_state_<year>_<aggregate>.json
+  Records completed, in-progress, and timing metrics per ticker.
+  Used by stocks_aggs_parallel_status.py for live monitoring.
 
 Usage:
-    python scripts/quotes_parallel_download.py --ohlcv_tickers --year 2025 --spawn 100 --logs --delay 1.1
+    python scripts/stocks_aggs_parallel_download.py --tickers_file data/universes/2025/combined_unique.csv --year 2025 --spawn 12
 
-    python scripts/quotes_parallel_download.py --tickers_file data/spy_tickers/tickers_combined_unique.csv --year 2010 --spawn 12
+    python scripts/stocks_aggs_parallel_download.py --tickers_file data/spy_tickers/tickers_combined_unique.csv --year 2025 --spawn 8 --resume --parquet
 
-    python scripts/quotes_parallel_download.py \\
-        --tickers_file data/spy_tickers/tickers_combined_unique.csv \\
-        --year 2025 --spawn 8 --parquet --resume --logs
+    python scripts/stocks_aggs_parallel_download.py --ohlcv_tickers --year 2022 --spawn 12 --parquet
 
-    python scripts/quotes_parallel_download.py \\
-        --ohlcv_tickers --year 2022 --spawn 12 --parquet
-
-State file: data/quotes/.parallel_state_<year>_<aggregate>.json
-  Records completed, in-progress, and timing metrics per ticker.
-  Used by quotes_parallel_status.py for live monitoring.
+    python scripts/stocks_aggs_parallel_download.py --tickers_file foo.csv --year 2025 --spawn 10 --output data/combined
 """
 
 import argparse
@@ -45,7 +36,7 @@ env_path = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(env_path)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-WORKER_SCRIPT = SCRIPT_DIR / "quotes_download.py"
+WORKER_SCRIPT = SCRIPT_DIR / "stocks_aggs_download.py"
 
 AGGREGATE_MAP = {
     "1min": (1, "minute", "1min"),
@@ -79,7 +70,7 @@ def parse_years(year_arg: str) -> list[str]:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Parallel download quote enrichment data using multiple worker processes"
+        description="Parallel download stock aggregate bars using multiple worker processes"
     )
     parser.add_argument(
         "--aggregate",
@@ -91,7 +82,7 @@ def parse_args():
         "--tickers_file",
         type=str,
         default=None,
-        help="Path to CSV with ticker list (header 'ticker')",
+        help="Path to CSV with ticker list (header 'ticker'; may also have market_cap,rank columns)",
     )
     parser.add_argument(
         "--ohlcv_tickers",
@@ -117,12 +108,6 @@ def parse_args():
         help="Skip tickers that already have a non-empty output file",
     )
     parser.add_argument(
-        "--smart_resume",
-        action="store_true",
-        default=False,
-        help="For each ticker, read its processing file and start from the day after its last row",
-    )
-    parser.add_argument(
         "--parquet",
         action="store_true",
         help="Write output as Parquet instead of CSV",
@@ -137,13 +122,7 @@ def parse_args():
         "--skip_completed",
         action="store_true",
         default=True,
-        help="Skip tickers that already have a non-empty output file in the final dir (default: True)",
-    )
-    parser.add_argument(
-        "--delay",
-        type=float,
-        default=0.1,
-        help="Seconds each worker sleeps after each trading day's fetch (default: 0.1)",
+        help="Skip tickers that already have a non-empty output file (default: True)",
     )
     parser.add_argument(
         "--output",
@@ -172,7 +151,7 @@ def load_ohlcv_tickers(year: str, agg: str) -> list[str]:
     src_dir = Path("data") / "SPY" / folder / year
     if not src_dir.exists():
         raise SystemExit("Error: OHLCV directory not found: %s" % src_dir)
-    pattern = f"*_{year}_{folder}.csv"
+    pattern = "*_%s_%s.csv" % (year, folder)
     tickers = []
     for f in sorted(src_dir.glob(pattern)):
         ticker = f.stem.split("_")[0]
@@ -182,18 +161,19 @@ def load_ohlcv_tickers(year: str, agg: str) -> list[str]:
     return tickers
 
 
-def output_path(ticker: str, year: str, agg: str, parquet: bool = False) -> Path:
+def output_path(ticker: str, year: str, agg: str, parquet: bool = False, output_dir: str | None = None) -> Path:
     folder = AGGREGATE_MAP[agg][2]
     ext = "parquet" if parquet else "csv"
-    return Path("data") / "quotes" / folder / year / f"{ticker}_{year}_{folder}_quotes.{ext}"
+    base = Path(output_dir) if output_dir else Path("data")
+    return base / "SPY" / folder / year / f"{ticker}_{year}_{folder}.{ext}"
 
 
 def tx_key(ticker: str, year: str) -> str:
     return f"{ticker}_{year}"
 
 
-def is_ticker_final(ticker: str, year: str, agg: str, parquet: bool) -> bool:
-    p = output_path(ticker, year, agg, parquet)
+def is_ticker_final(ticker: str, year: str, agg: str, parquet: bool, output_dir: str | None = None) -> bool:
+    p = output_path(ticker, year, agg, parquet, output_dir)
     if not p.exists() or p.stat().st_size == 0:
         return False
     if parquet:
@@ -211,34 +191,6 @@ def load_state(state_path: Path):
         with open(state_path) as f:
             return json.load(f)
     return {"completed": {}, "in_progress": {}, "all_tickers": [], "stats": {}}
-
-
-def processing_path(ticker: str, year: str, agg: str, parquet: bool = False) -> Path:
-    folder = AGGREGATE_MAP[agg][2]
-    ext = "parquet" if parquet else "csv"
-    return Path("data") / "quotes" / folder / year / "processing" / f"{ticker}_{year}_{folder}_quotes.{ext}"
-
-
-def last_row_date(ticker: str, year: str, agg: str, parquet: bool) -> str | None:
-    path = processing_path(ticker, year, agg, parquet)
-    if not path.exists() or path.stat().st_size == 0:
-        return None
-    with open(path) as f:
-        last_line = None
-        for line in f:
-            line = line.strip()
-            if line:
-                last_line = line
-    if not last_line:
-        return None
-    parts = last_line.split(",")
-    if len(parts) < 2:
-        return None
-    try:
-        ts = datetime.datetime.fromisoformat(parts[1])
-        return ts.date().isoformat()
-    except (ValueError, IndexError):
-        return None
 
 
 def save_state(state_path: Path, state: dict):
@@ -273,7 +225,8 @@ def run_year(agg: str, year: str, args) -> dict:
     folder = AGGREGATE_MAP[agg][2]
     year_start = time.time()
 
-    state_path = Path("data") / "quotes" / f".parallel_state_{year}_{folder}.json"
+    state_base = Path(args.output) if args.output else Path("data") / "SPY"
+    state_path = state_base / f".parallel_state_{year}_{folder}.json"
     state = load_state(state_path)
 
     if args.ohlcv_tickers:
@@ -286,7 +239,7 @@ def run_year(agg: str, year: str, args) -> dict:
     if args.skip_completed:
         pre_filtered = []
         for t in all_tickers:
-            if is_ticker_final(t, year, agg, args.parquet):
+            if is_ticker_final(t, year, agg, args.parquet, args.output):
                 continue
             pre_filtered.append(t)
         skipped_pre = len(all_tickers) - len(pre_filtered)
@@ -301,7 +254,7 @@ def run_year(agg: str, year: str, args) -> dict:
         if key in state.get("completed", {}):
             continue
         if args.resume:
-            if is_ticker_final(t, year, agg, args.parquet):
+            if is_ticker_final(t, year, agg, args.parquet, args.output):
                 continue
         if key in state.get("in_progress", {}):
             continue
@@ -322,18 +275,17 @@ def run_year(agg: str, year: str, args) -> dict:
 
     log_fh = None
     if args.logs:
-        log_dir = Path("data") / "quotes" / folder / "logs"
+        log_dir = state_base / folder / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_ts = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
         log_path = log_dir / f"parallel_{year}_{folder}_{log_ts}.log"
         log_fh = open(log_path, "w")
 
-    state["config"] = {"workers": args.spawn, "delay": args.delay, "aggregate": agg, "year": year}
+    state["config"] = {"workers": args.spawn, "aggregate": agg, "year": year}
     ticker_source = "ohlcv_tickers" if args.ohlcv_tickers else args.tickers_file
     log("=" * 60)
-    log("PARALLEL QUOTE ENRICHMENT DOWNLOAD  [year %s]" % year)
+    log("PARALLEL STOCK AGGREGATE DOWNLOAD  [year %s]" % year)
     log("  Workers:      %d" % args.spawn)
-    log("  Delay:        %.2fs" % args.delay)
     log("  Aggregate:    %s" % agg)
     log("  Format:       %s" % ("parquet" if args.parquet else "csv"))
     log("  Resume:       %s" % args.resume)
@@ -375,19 +327,14 @@ def run_year(agg: str, year: str, args) -> dict:
             "--year", year,
             "--aggregate", agg,
         ]
-        if args.parquet:
-            cmd.append("--parquet")
         if args.resume:
             cmd.append("--resume")
-        if args.smart_resume:
-            start_from = last_row_date(ticker, year, agg, args.parquet)
-            if start_from:
-                cmd.extend(["--start_date", start_from])
+        if args.parquet:
+            cmd.append("--parquet")
         if args.logs:
             cmd.append("--logs")
         if args.output:
             cmd.extend(["--output", args.output])
-        cmd.extend(["--delay", str(args.delay)])
         try:
             stderr_file = open(f"/tmp/worker_{ticker}_{year}.log", "w")
             proc = subprocess.Popen(
@@ -520,7 +467,7 @@ def run_year(agg: str, year: str, args) -> dict:
 
     log_ts = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
     report = {
-        "script": "quotes_parallel_download",
+        "script": "stocks_aggs_parallel_download",
         "timestamp": log_ts,
         "year": year,
         "aggregate": agg,
@@ -536,7 +483,7 @@ def run_year(agg: str, year: str, args) -> dict:
         "completed": state["completed"],
         "stats": stats,
     }
-    report_dir = Path("data") / "quotes" / folder
+    report_dir = state_base / folder
     report_dir.mkdir(parents=True, exist_ok=True)
     report_path = report_dir / f"parallel_report_{year}_{folder}.json"
     with open(report_path, "w") as f:
