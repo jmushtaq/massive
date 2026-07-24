@@ -230,22 +230,23 @@ def last_row_date(ticker: str, year: str, agg: str, output_dir: str | None = Non
     path = output_path(ticker, year, agg, subdir="processing", output_dir=output_dir)
     if not path.exists() or path.stat().st_size == 0:
         return None
+    last_ts = None
     with open(path) as f:
-        last_line = None
         for line in f:
-            line = line.strip()
-            if line:
-                last_line = line
-    if not last_line:
+            line = line.strip().strip("\x00").strip()
+            if not line or "," not in line:
+                continue
+            parts = line.split(",")
+            if len(parts) < 2:
+                continue
+            try:
+                ts = datetime.datetime.fromisoformat(parts[1])
+                last_ts = ts
+            except (ValueError, IndexError):
+                continue
+    if last_ts is None:
         return None
-    parts = last_line.split(",")
-    if len(parts) < 2:
-        return None
-    try:
-        ts = datetime.datetime.fromisoformat(parts[1])
-        return ts.date().isoformat()
-    except (ValueError, IndexError):
-        return None
+    return last_ts.date().isoformat()
 
 
 def _append_rows(path: Path, rows: list[dict], parquet: bool) -> None:

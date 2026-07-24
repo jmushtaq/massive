@@ -10,7 +10,7 @@ State file: data/SPY/.parallel_state_<year>_<aggregate>.json
   Used by stocks_aggs_parallel_status.py for live monitoring.
 
 Usage:
-    python scripts/stocks_aggs_parallel_download.py --tickers_file data/universes/2025/combined_unique.csv --year 2025 --spawn 12
+    python scripts/stocks_aggs_parallel_download.py --tickers_file data/universes/2025/combined_unique.csv --year 2025 --spawn 12 -output data/combined
 
     python scripts/stocks_aggs_parallel_download.py --tickers_file data/spy_tickers/tickers_combined_unique.csv --year 2025 --spawn 8 --resume --parquet
 
@@ -130,6 +130,12 @@ def parse_args():
         default=None,
         help="Base output directory passed to workers via --output (default: data/)",
     )
+    parser.add_argument(
+        "--check",
+        type=str,
+        default=None,
+        help="Directory to check for existing per-ticker files, e.g. 'data/quotes'. Script will skip tickers whose file already exists at <check>/<aggregate>/<year>/<ticker>_<year>_<folder>.csv",
+    )
     return parser.parse_args()
 
 
@@ -246,23 +252,6 @@ def run_year(agg: str, year: str, args) -> dict:
         all_tickers = pre_filtered
     else:
         skipped_pre = 0
-    state["all_tickers"] = all_tickers
-
-    ticker_queue = []
-    for t in all_tickers:
-        key = tx_key(t, year)
-        if key in state.get("completed", {}):
-            continue
-        if args.resume:
-            if is_ticker_final(t, year, agg, args.parquet, args.output):
-                continue
-        if key in state.get("in_progress", {}):
-            continue
-        ticker_queue.append(t)
-
-    total = len(all_tickers)
-    remaining = len(ticker_queue)
-    completed_count = total - remaining + skipped_pre
 
     log_lines: list[str] = []
 
@@ -281,6 +270,39 @@ def run_year(agg: str, year: str, args) -> dict:
         log_path = log_dir / f"parallel_{year}_{folder}_{log_ts}.log"
         log_fh = open(log_path, "w")
 
+    if args.check:
+        check_filtered = []
+        folder_label = AGGREGATE_MAP[agg][2]
+        ext = "parquet" if args.parquet else "csv"
+        for t in all_tickers:
+            check_file = Path(args.check) / folder_label / year / f"{t}_{year}_{folder_label}.{ext}"
+            if check_file.exists() and check_file.stat().st_size > 0:
+                continue
+            check_filtered.append(t)
+        checked_skipped = len(all_tickers) - len(check_filtered)
+        if checked_skipped:
+            log("  Check dir skipped: %d tickers (file exists in %s)" % (checked_skipped, args.check))
+        all_tickers = check_filtered
+        skipped_pre += checked_skipped
+
+    state["all_tickers"] = all_tickers
+
+    ticker_queue = []
+    for t in all_tickers:
+        key = tx_key(t, year)
+        if key in state.get("completed", {}):
+            continue
+        if args.resume:
+            if is_ticker_final(t, year, agg, args.parquet, args.output):
+                continue
+        if key in state.get("in_progress", {}):
+            continue
+        ticker_queue.append(t)
+
+    total = len(all_tickers)
+    remaining = len(ticker_queue)
+    completed_count = total - remaining + skipped_pre
+
     state["config"] = {"workers": args.spawn, "aggregate": agg, "year": year}
     ticker_source = "ohlcv_tickers" if args.ohlcv_tickers else args.tickers_file
     log("=" * 60)
@@ -296,6 +318,8 @@ def run_year(agg: str, year: str, args) -> dict:
     log("  Skip compl:   %s" % args.skip_completed)
     if args.output:
         log("  Output base:  %s" % args.output)
+    if args.check:
+        log("  Check dir:    %s" % args.check)
     log("  Total:        %d tickers" % total)
     log("  Already done: %d" % completed_count)
     log("  Remaining:    %d" % remaining)
@@ -355,6 +379,7 @@ def run_year(agg: str, year: str, args) -> dict:
             "stderr_file": stderr_file,
         }
         state["in_progress"][key] = {"pid": proc.pid, "start_time": entry["start_time"]}
+        state["stats"] = {"elapsed_s": round(time.time() - year_start, 1), "total_tickers": total, "completed": len(state["completed"]), "running": len(state["in_progress"])}
         save_state(state_path, state)
         active_workers.append(entry)
         return proc
@@ -388,6 +413,7 @@ def run_year(agg: str, year: str, args) -> dict:
                 }
                 if key in state["in_progress"]:
                     del state["in_progress"][key]
+                state["stats"] = {"elapsed_s": round(time.time() - year_start, 1), "total_tickers": total, "completed": len(state["completed"]), "running": len(state["in_progress"])}
                 save_state(state_path, state)
                 log("[%s] %s finished in %.1fs" % (worker_status.upper(), ticker, duration))
             else:

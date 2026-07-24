@@ -151,6 +151,12 @@ def parse_args():
         default=None,
         help="Base output directory passed to workers via --output (default: data/)",
     )
+    parser.add_argument(
+        "--check",
+        type=str,
+        default=None,
+        help="Directory to check for existing per-ticker files, e.g. 'data/quotes'. Script will skip tickers whose file already exists at <check>/<aggregate>/<year>/<ticker>_<year>_<folder>_quotes.csv",
+    )
     return parser.parse_args()
 
 
@@ -182,18 +188,19 @@ def load_ohlcv_tickers(year: str, agg: str) -> list[str]:
     return tickers
 
 
-def output_path(ticker: str, year: str, agg: str, parquet: bool = False) -> Path:
+def output_path(ticker: str, year: str, agg: str, parquet: bool = False, output_dir: str | None = None) -> Path:
     folder = AGGREGATE_MAP[agg][2]
     ext = "parquet" if parquet else "csv"
-    return Path("data") / "quotes" / folder / year / f"{ticker}_{year}_{folder}_quotes.{ext}"
+    base = Path(output_dir) if output_dir else Path("data")
+    return base / "quotes" / folder / year / f"{ticker}_{year}_{folder}_quotes.{ext}"
 
 
 def tx_key(ticker: str, year: str) -> str:
     return f"{ticker}_{year}"
 
 
-def is_ticker_final(ticker: str, year: str, agg: str, parquet: bool) -> bool:
-    p = output_path(ticker, year, agg, parquet)
+def is_ticker_final(ticker: str, year: str, agg: str, parquet: bool, output_dir: str | None = None) -> bool:
+    p = output_path(ticker, year, agg, parquet, output_dir)
     if not p.exists() or p.stat().st_size == 0:
         return False
     if parquet:
@@ -213,32 +220,34 @@ def load_state(state_path: Path):
     return {"completed": {}, "in_progress": {}, "all_tickers": [], "stats": {}}
 
 
-def processing_path(ticker: str, year: str, agg: str, parquet: bool = False) -> Path:
+def processing_path(ticker: str, year: str, agg: str, parquet: bool = False, output_dir: str | None = None) -> Path:
     folder = AGGREGATE_MAP[agg][2]
     ext = "parquet" if parquet else "csv"
-    return Path("data") / "quotes" / folder / year / "processing" / f"{ticker}_{year}_{folder}_quotes.{ext}"
+    base = Path(output_dir) if output_dir else Path("data")
+    return base / "quotes" / folder / year / "processing" / f"{ticker}_{year}_{folder}_quotes.{ext}"
 
 
-def last_row_date(ticker: str, year: str, agg: str, parquet: bool) -> str | None:
-    path = processing_path(ticker, year, agg, parquet)
+def last_row_date(ticker: str, year: str, agg: str, parquet: bool, output_dir: str | None = None) -> str | None:
+    path = processing_path(ticker, year, agg, parquet, output_dir)
     if not path.exists() or path.stat().st_size == 0:
         return None
+    last_ts = None
     with open(path) as f:
-        last_line = None
         for line in f:
-            line = line.strip()
-            if line:
-                last_line = line
-    if not last_line:
+            line = line.strip().strip("\x00").strip()
+            if not line or "," not in line:
+                continue
+            parts = line.split(",")
+            if len(parts) < 2:
+                continue
+            try:
+                ts = datetime.datetime.fromisoformat(parts[1])
+                last_ts = ts
+            except (ValueError, IndexError):
+                continue
+    if last_ts is None:
         return None
-    parts = last_line.split(",")
-    if len(parts) < 2:
-        return None
-    try:
-        ts = datetime.datetime.fromisoformat(parts[1])
-        return ts.date().isoformat()
-    except (ValueError, IndexError):
-        return None
+    return last_ts.date().isoformat()
 
 
 def save_state(state_path: Path, state: dict):
@@ -273,7 +282,8 @@ def run_year(agg: str, year: str, args) -> dict:
     folder = AGGREGATE_MAP[agg][2]
     year_start = time.time()
 
-    state_path = Path("data") / "quotes" / f".parallel_state_{year}_{folder}.json"
+    state_base = Path(args.output) if args.output else Path("data") / "quotes"
+    state_path = state_base / f".parallel_state_{year}_{folder}.json"
     state = load_state(state_path)
 
     if args.ohlcv_tickers:
@@ -286,30 +296,13 @@ def run_year(agg: str, year: str, args) -> dict:
     if args.skip_completed:
         pre_filtered = []
         for t in all_tickers:
-            if is_ticker_final(t, year, agg, args.parquet):
+            if is_ticker_final(t, year, agg, args.parquet, args.output):
                 continue
             pre_filtered.append(t)
         skipped_pre = len(all_tickers) - len(pre_filtered)
         all_tickers = pre_filtered
     else:
         skipped_pre = 0
-    state["all_tickers"] = all_tickers
-
-    ticker_queue = []
-    for t in all_tickers:
-        key = tx_key(t, year)
-        if key in state.get("completed", {}):
-            continue
-        if args.resume:
-            if is_ticker_final(t, year, agg, args.parquet):
-                continue
-        if key in state.get("in_progress", {}):
-            continue
-        ticker_queue.append(t)
-
-    total = len(all_tickers)
-    remaining = len(ticker_queue)
-    completed_count = total - remaining + skipped_pre
 
     log_lines: list[str] = []
 
@@ -322,11 +315,45 @@ def run_year(agg: str, year: str, args) -> dict:
 
     log_fh = None
     if args.logs:
-        log_dir = Path("data") / "quotes" / folder / "logs"
+        log_base = Path(args.output) if args.output else Path("data") / "quotes"
+        log_dir = log_base / folder / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_ts = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
         log_path = log_dir / f"parallel_{year}_{folder}_{log_ts}.log"
         log_fh = open(log_path, "w")
+
+    if args.check:
+        check_filtered = []
+        folder_label = AGGREGATE_MAP[agg][2]
+        ext = "parquet" if args.parquet else "csv"
+        for t in all_tickers:
+            check_file = Path(args.check) / folder_label / year / f"{t}_{year}_{folder_label}_quotes.{ext}"
+            if check_file.exists() and check_file.stat().st_size > 0:
+                continue
+            check_filtered.append(t)
+        checked_skipped = len(all_tickers) - len(check_filtered)
+        if checked_skipped:
+            log("  Check dir skipped: %d tickers (file exists in %s)" % (checked_skipped, args.check))
+        all_tickers = check_filtered
+        skipped_pre += checked_skipped
+
+    state["all_tickers"] = all_tickers
+
+    ticker_queue = []
+    for t in all_tickers:
+        key = tx_key(t, year)
+        if key in state.get("completed", {}):
+            continue
+        if args.resume:
+            if is_ticker_final(t, year, agg, args.parquet, args.output):
+                continue
+        if key in state.get("in_progress", {}):
+            continue
+        ticker_queue.append(t)
+
+    total = len(all_tickers)
+    remaining = len(ticker_queue)
+    completed_count = total - remaining + skipped_pre
 
     state["config"] = {"workers": args.spawn, "delay": args.delay, "aggregate": agg, "year": year}
     ticker_source = "ohlcv_tickers" if args.ohlcv_tickers else args.tickers_file
@@ -344,6 +371,8 @@ def run_year(agg: str, year: str, args) -> dict:
     log("  Skip compl:   %s" % args.skip_completed)
     if args.output:
         log("  Output base:  %s" % args.output)
+    if args.check:
+        log("  Check dir:    %s" % args.check)
     log("  Total:        %d tickers" % total)
     log("  Already done: %d" % completed_count)
     log("  Remaining:    %d" % remaining)
@@ -380,7 +409,7 @@ def run_year(agg: str, year: str, args) -> dict:
         if args.resume:
             cmd.append("--resume")
         if args.smart_resume:
-            start_from = last_row_date(ticker, year, agg, args.parquet)
+            start_from = last_row_date(ticker, year, agg, args.parquet, args.output)
             if start_from:
                 cmd.extend(["--start_date", start_from])
         if args.logs:
@@ -408,6 +437,7 @@ def run_year(agg: str, year: str, args) -> dict:
             "stderr_file": stderr_file,
         }
         state["in_progress"][key] = {"pid": proc.pid, "start_time": entry["start_time"]}
+        state["stats"] = {"elapsed_s": round(time.time() - year_start, 1), "total_tickers": total, "completed": len(state["completed"]), "running": len(state["in_progress"])}
         save_state(state_path, state)
         active_workers.append(entry)
         return proc
@@ -441,6 +471,7 @@ def run_year(agg: str, year: str, args) -> dict:
                 }
                 if key in state["in_progress"]:
                     del state["in_progress"][key]
+                state["stats"] = {"elapsed_s": round(time.time() - year_start, 1), "total_tickers": total, "completed": len(state["completed"]), "running": len(state["in_progress"])}
                 save_state(state_path, state)
                 log("[%s] %s finished in %.1fs" % (worker_status.upper(), ticker, duration))
             else:
@@ -536,7 +567,8 @@ def run_year(agg: str, year: str, args) -> dict:
         "completed": state["completed"],
         "stats": stats,
     }
-    report_dir = Path("data") / "quotes" / folder
+    report_base = Path(args.output) if args.output else Path("data") / "quotes"
+    report_dir = report_base / folder
     report_dir.mkdir(parents=True, exist_ok=True)
     report_path = report_dir / f"parallel_report_{year}_{folder}.json"
     with open(report_path, "w") as f:

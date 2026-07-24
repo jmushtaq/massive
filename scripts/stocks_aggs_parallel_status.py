@@ -102,18 +102,7 @@ def show_status(state_path: Path):
     completed_no_data = sum(1 for v in completed.values() if v.get("status") == "no_data")
     completed_failed = sum(1 for v in completed.values() if v.get("status") == "failed")
 
-    earliest_start = float("inf")
-    for v in in_progress.values():
-        st = v.get("start_time", 0)
-        if st and st < earliest_start:
-            earliest_start = st
-    for v in completed.values():
-        st = v.get("start_time", 0)
-        if st and st < earliest_start:
-            earliest_start = st
     elapsed = stats.get("elapsed_s", 0)
-    if earliest_start < float("inf"):
-        elapsed = time.time() - earliest_start
     elapsed_hours = elapsed / 3600 if elapsed > 0 else 0.001
 
     pct = (done / total * 100) if total > 0 else 0

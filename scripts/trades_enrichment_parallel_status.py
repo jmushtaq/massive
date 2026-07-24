@@ -58,6 +58,12 @@ def parse_args():
         action="store_true",
         help="Kill all running workers and the dispatcher process",
     )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Base output directory where state file lives (e.g. data/combined).",
+    )
     return parser.parse_args()
 
 
@@ -99,19 +105,7 @@ def show_status(state_path: Path):
     completed_no_data = sum(1 for v in completed.values() if v.get("status") == "no_data")
     completed_failed = sum(1 for v in completed.values() if v.get("status") == "failed")
 
-    # Compute live elapsed from earliest activity
-    earliest_start = float("inf")
-    for v in in_progress.values():
-        st = v.get("start_time", 0)
-        if st and st < earliest_start:
-            earliest_start = st
-    for v in completed.values():
-        st = v.get("start_time", 0)
-        if st and st < earliest_start:
-            earliest_start = st
     elapsed = stats.get("elapsed_s", 0)
-    if earliest_start < float("inf"):
-        elapsed = time.time() - earliest_start
     elapsed_hours = elapsed / 3600 if elapsed > 0 else 0.001
 
     pct = (done / total * 100) if total > 0 else 0
@@ -238,25 +232,24 @@ def kill_workers(state_path: Path):
 def main():
     args = parse_args()
 
-    data_dir = Path("data") / "trades"
-    pattern = ".parallel_state_"
-    if args.year:
-        pattern += args.year
-    if args.aggregate:
-        pattern += "_" + AGGREGATE_MAP[args.aggregate]
-    else:
-        pattern += "*"
-
-    state_files = sorted(data_dir.glob(pattern + ".json"))
+    search_dirs = [Path("data") / "trades"]
+    if args.output:
+        search_dirs.insert(0, Path(args.output))
+    state_files = []
+    for data_dir in search_dirs:
+        pattern = ".parallel_state_"
+        if args.year:
+            pattern += args.year
+        if args.aggregate:
+            pattern += "_" + AGGREGATE_MAP[args.aggregate]
+        else:
+            pattern += "*"
+        state_files.extend(data_dir.glob(pattern + ".json"))
+    state_files = sorted(set(state_files))
 
     if not state_files:
-        print("No matching state files found in %s" % data_dir)
-        # List available
-        available = list(data_dir.glob(".parallel_state_*.json"))
-        if available:
-            print("Available state files:")
-            for sf in available:
-                print("  %s" % sf.name)
+        dirs_str = ", ".join(str(d) for d in search_dirs)
+        print("No matching state files found in " + dirs_str)
         sys.exit(1)
 
     if args.kill:
