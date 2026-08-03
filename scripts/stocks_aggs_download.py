@@ -59,6 +59,7 @@ from massive.rest.models import Agg
 SCRIPT_NAME = Path(__file__).resolve().stem
 
 AGGREGATE_MAP = {
+    "1sec": (1, "second", "1sec"),
     "1min": (1, "minute", "1min"),
     "5min": (5, "minute", "5min"),
     "15min": (15, "minute", "15min"),
@@ -231,39 +232,86 @@ def download_ticker(client, ticker: str, year: str, agg: str, parquet: bool = Fa
     to_date = f"{year}-12-31"
     multiplier, timespan, _ = agg_params(agg)
 
-    aggs = []
-    for a in client.list_aggs(
-        ticker,
-        multiplier,
-        timespan,
-        from_date,
-        to_date,
-        adjusted=True,
-        limit=50000,
-    ):
-        aggs.append(a)
-
-    if not aggs:
-        return 0
-
-    rows = list(build_rows(aggs))
     proc_path = output_path(ticker, year, agg, parquet, output_dir, subdir="processing")
     proc_path.parent.mkdir(parents=True, exist_ok=True)
 
+    count = 0
+
     if parquet:
-        table = pa.Table.from_pylist(rows)
-        pq.write_table(table, proc_path)
+        schema = pa.schema([
+            ("timestamp", pa.string()),
+            ("open", pa.float64()),
+            ("high", pa.float64()),
+            ("low", pa.float64()),
+            ("close", pa.float64()),
+            ("volume", pa.float64()),
+            ("vwap", pa.float64()),
+            ("transactions", pa.int64()),
+            ("otc", pa.float64()),
+        ])
+        writer = None
+        batch = []
+        for a in client.list_aggs(
+            ticker, multiplier, timespan, from_date, to_date,
+            adjusted=True, limit=50000,
+        ):
+            if isinstance(a, Agg) and isinstance(a.timestamp, int):
+                batch.append({
+                    "timestamp": datetime.datetime.fromtimestamp(a.timestamp / 1000).isoformat(),
+                    "open": a.open,
+                    "high": a.high,
+                    "low": a.low,
+                    "close": a.close,
+                    "volume": a.volume,
+                    "vwap": a.vwap,
+                    "transactions": a.transactions,
+                    "otc": a.otc,
+                })
+                if len(batch) >= 50000:
+                    table = pa.Table.from_pylist(batch, schema=schema)
+                    if writer is None:
+                        writer = pq.ParquetWriter(proc_path, schema)
+                    writer.write_table(table)
+                    count += len(batch)
+                    batch = []
+        if batch:
+            table = pa.Table.from_pylist(batch, schema=schema)
+            if writer is None:
+                writer = pq.ParquetWriter(proc_path, schema)
+            writer.write_table(table)
+            count += len(batch)
+        if writer is not None:
+            writer.close()
     else:
         with open(proc_path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=CSV_HEADERS)
             writer.writeheader()
-            writer.writerows(rows)
+            for a in client.list_aggs(
+                ticker, multiplier, timespan, from_date, to_date,
+                adjusted=True, limit=50000,
+            ):
+                if isinstance(a, Agg) and isinstance(a.timestamp, int):
+                    writer.writerow({
+                        "timestamp": datetime.datetime.fromtimestamp(a.timestamp / 1000).isoformat(),
+                        "open": a.open,
+                        "high": a.high,
+                        "low": a.low,
+                        "close": a.close,
+                        "volume": a.volume,
+                        "vwap": a.vwap,
+                        "transactions": a.transactions,
+                        "otc": a.otc,
+                    })
+                    count += 1
+            f.flush()
+
+    if count == 0:
+        return 0
 
     out = output_path(ticker, year, agg, parquet, output_dir)
     out.parent.mkdir(parents=True, exist_ok=True)
     proc_path.rename(out)
-
-    return len(rows)
+    return count
 
 
 def fmt_bytes(size: int) -> str:
@@ -368,6 +416,8 @@ def main():
                     "elapsed_s": round(elapsed, 1),
                 })
                 logger.info("PARALLEL_RESULT:{\"ticker\":\"%s\",\"year\":\"%s\",\"status\":\"ok\",\"rows\":%d}", ticker, year, count)
+                sys.stderr.write("PARALLEL_RESULT:{\"ticker\":\"%s\",\"year\":\"%s\",\"status\":\"ok\",\"rows\":%d}\n" % (ticker, year, count))
+                sys.stderr.flush()
 
             time.sleep(0.25)
 

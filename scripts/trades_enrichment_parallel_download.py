@@ -32,6 +32,7 @@ import csv
 import datetime
 import json
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -47,6 +48,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 WORKER_SCRIPT = SCRIPT_DIR / "trades_enrichment_download.py"
 
 AGGREGATE_MAP = {
+    "1sec": (1, "second", "1sec"),
     "1min": (1, "minute", "1min"),
     "5min": (5, "minute", "5min"),
     "15min": (15, "minute", "15min"),
@@ -261,20 +263,30 @@ STDOUT_MARKER = "PARALLEL_RESULT:"
 SCRIPT_NAME = Path(__file__).resolve().stem
 
 
-def parse_worker_status(proc, ret: int) -> str:
+def parse_worker_status(proc, ret: int, result_line: str | None = None) -> str:
     if ret != 0:
         return "failed"
-    if proc.stdout:
+    if result_line and STDOUT_MARKER in result_line:
         try:
-            for line in proc.stdout:
-                if STDOUT_MARKER in line:
-                    result = json.loads(line.split(STDOUT_MARKER)[1].strip())
-                    proc.stdout.close()
-                    return result.get("status", "ok")
+            result = json.loads(result_line.split(STDOUT_MARKER)[1].strip())
+            return result.get("status", "ok")
         except Exception:
             pass
-        proc.stdout.close()
     return "ok"
+
+
+def _drain_worker_stderr(entry):
+    proc = entry["proc"]
+    if not proc or not proc.stderr:
+        return
+    while select.select([proc.stderr], [], [], 0)[0]:
+        line = proc.stderr.readline()
+        if not line:
+            break
+        entry["stderr_file"].write(line)
+        entry["stderr_file"].flush()
+        if STDOUT_MARKER in line:
+            entry["_result_line"] = line.strip()
 
 
 def run_year(agg: str, year: str, args, overall_start: float) -> dict:
@@ -420,8 +432,8 @@ def run_year(agg: str, year: str, args, overall_start: float) -> dict:
             stderr_file = open(f"/tmp/worker_{ticker}_{year}.log", "w")
             proc = subprocess.Popen(
                 cmd,
-                stdout=subprocess.PIPE,
-                stderr=stderr_file,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 text=True,
             )
         except Exception as e:
@@ -456,11 +468,14 @@ def run_year(agg: str, year: str, args, overall_start: float) -> dict:
                 key = tx_key(ticker, year)
                 duration = time.time() - entry["start_time"]
 
-                worker_status = parse_worker_status(proc, ret)
+                _drain_worker_stderr(entry)
+                worker_status = parse_worker_status(proc, ret, entry.get("_result_line"))
                 if worker_status == "failed":
                     errors_occurred = True
 
                 entry["stderr_file"].close()
+                if proc.stderr:
+                    proc.stderr.close()
                 state["completed"][key] = {
                     "ticker": ticker,
                     "duration_s": round(duration, 1),
@@ -479,6 +494,8 @@ def run_year(agg: str, year: str, args, overall_start: float) -> dict:
 
     try:
         while active_workers or queue:
+            for entry in active_workers:
+                _drain_worker_stderr(entry)
             reap_finished()
             while len(active_workers) < args.spawn and queue:
                 ticker = queue.pop()

@@ -18,8 +18,10 @@ visidata==3.4
 # sudo snap install aws-cli --classic
 
 # Needed for shell_plus crash issue
-jedi==0.17.2
-parso==0.7.1
+#jedi==0.17.2
+#parso==0.7.1
+jedi==0.19.0
+parso==0.8.3
 
 # pip install -U setuptools
 # And then: pip install ujson

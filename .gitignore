@@ -9,6 +9,7 @@ mooring/cache/*
 .ropeproject/
 csv
 *.csv
+*.gz
 *.xls*
 *.swo
 *.png

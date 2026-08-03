@@ -1,0 +1,96 @@
+# adjust_options_for_splits.py
+
+Post-processes options CSV files to multiply option-specific price/strike columns by cumulative split adjustment factors, making them consistent with the split-adjusted underlying OHLCV data.
+
+## Why
+
+Options data from S3 flat files (OPRA) has raw/unadjusted option strikes and prices. The underlying OHLCV data from `stocks_aggs_download.py` uses `adjusted=True` and is already split-adjusted. This mismatch means pre-split option strikes and premiums don't line up with the adjusted underlying prices.
+
+Example: NVDA had a 10-for-1 split on 2024-06-10. A 2023 row shows `underlying_price=1200` (adjusted) but `atm_strike=120` (raw). After adjustment: `atm_strike=1200` (multiplied by 10).
+
+## How it works
+
+1. Reads split ratios from `data/corporate_actions/splits.csv`
+2. For each options CSV file, computes a per-row cumulative adjustment factor:
+   - Factor = product of all `(split_to / split_from)` for splits whose `execution_date > row_date`
+   - Splits that occurred AFTER the row's date apply; splits on or before the row's date do not
+3. Multiplies these 6 columns by the factor:
+   - `atm_strike`, `atm_call_close`, `atm_put_close`
+   - `iv30d_strike`, `iv30d_call_close`, `iv30d_put_close`
+4. Recomputes derived columns: `atm_straddle_price`, `expected_move`
+5. Leaves underlying OHLCV columns untouched (already adjusted by the API)
+6. Writes output to `adjusted/` subdirectory within each year folder
+
+## Prerequisite
+
+Split data must exist at `data/corporate_actions/splits.csv`. Generate it with:
+
+```bash
+python scripts/corporate_actions_download.py --tickers_file data/universes/2025/combined_unique.csv
+```
+
+## Usage
+
+```bash
+# Preview what would change (no files written)
+python scripts/options/adjust_options_for_splits.py --year 2023 --dry-run
+
+# Adjust specific year
+python scripts/options/adjust_options_for_splits.py --year 2023
+
+# Adjust multiple years
+python scripts/options/adjust_options_for_splits.py --year 2022-2023
+
+# Custom input directory (CSV files at <input>/<year>/<ticker>_...csv)
+python scripts/options/adjust_options_for_splits.py --year 2023 --input /tmp/options_staging
+
+# Write to custom output base (preserves subdirectory structure)
+python scripts/options/adjust_options_for_splits.py --year 2023 --output data/options/stocks_adjusted
+
+# Use custom splits file
+python scripts/options/adjust_options_for_splits.py --year 2023 --splits_file /path/to/splits.csv
+```
+
+## Arguments
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `--year` | Yes | — | Year(s) to adjust, e.g. `2023` or `2022-2023` |
+| `--aggregate` | No | `1min` | Aggregate window size: `1sec`, `1min`, `5min`, `15min`, `1H`, `4H`, `1D` |
+| `--input` | No | `data/options/stocks/<agg>` | Directory containing CSV files. When set, files are at `<input>/<year>/<ticker>_<year>_<agg>_options.csv` |
+| `--output` | No | `adjusted/` subdir | Base output directory. Adjusted files go to `<output>/<agg>/<year>/` |
+| `--splits_file` | No | `data/corporate_actions/splits.csv` | Path to splits CSV |
+| `--dry-run` | No | `off` | Report what would change without writing files |
+
+## Output layout
+
+| Mode | Output path |
+|---|---|
+| Default | `data/options/stocks/<agg>/<year>/adjusted/<ticker>_<year>_<agg>_options.csv` |
+| `--output <dir>` | `<dir>/options/stocks/<agg>/<year>/<ticker>_<year>_<agg>_options.csv` |
+
+Original files are never overwritten.
+
+## Validation
+
+The script runs these checks on every adjusted file:
+- No negative values in adjusted price columns
+- `atm_straddle_price` equals `expected_move` (they share the same computation)
+- `atm_strike` stays within reasonable range of `underlying_price`
+
+## Typical workflow
+
+```bash
+# 1. Download flat files to cache
+python scripts/options/stock_options_from_flatfiles_parallel_download.py --download_only --year 2023 --spawn 100
+
+# 2. Process options from cache (no S3 calls)
+python scripts/options/stock_options_from_flatfiles_parallel_download.py --ohlcv_tickers --year 2023 --spawn 100 --use_local_cache --smart_resume --resume
+
+# 3. Adjust for splits
+python scripts/options/adjust_options_for_splits.py --year 2023
+
+# 4. Verify (check a few rows manually before deleting raw files)
+diff <(head -100 data/options/stocks/1min/2023/NVDA_2023_1min_options.csv) \
+     <(head -100 data/options/stocks/1min/2023/adjusted/NVDA_2023_1min_options.csv) | head -40
+```

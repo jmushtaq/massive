@@ -56,6 +56,7 @@ from massive import RESTClient
 SCRIPT_NAME = Path(__file__).resolve().stem
 
 AGGREGATE_MAP = {
+    "1sec": (1, "second", "1sec"),
     "1min": (1, "minute", "1min"),
     "5min": (5, "minute", "5min"),
     "15min": (15, "minute", "15min"),
@@ -87,6 +88,7 @@ CSV_HEADERS = [
 ]
 
 NANOS_PER_MINUTE = 60_000_000_000
+NANOS_PER_SECOND = 1_000_000_000
 
 
 def clean_ticker(raw: str) -> str:
@@ -267,14 +269,14 @@ def _append_rows(path: Path, rows: list[dict], parquet: bool) -> None:
             writer.writerows(rows)
 
 
-def process_day(ticker: str, day: datetime.date, client, cum_delta: float, delay: float = 0.1) -> tuple[list[dict], float]:
+def process_day(ticker: str, day: datetime.date, client, cum_delta: float, delay: float = 0.1, bucket_ns: int = NANOS_PER_MINUTE) -> tuple[list[dict], float]:
     bucket: dict[int, list] = defaultdict(list)
 
     date_str = day.isoformat()
     try:
         for t in client.list_trades(ticker, date_str, limit=50000):
             if t.sip_timestamp is not None and t.size is not None and t.price is not None:
-                bucket[t.sip_timestamp // NANOS_PER_MINUTE].append(
+                bucket[t.sip_timestamp // bucket_ns].append(
                     (t.sip_timestamp, t.price, t.size)
                 )
     except Exception:
@@ -290,7 +292,7 @@ def process_day(ticker: str, day: datetime.date, client, cum_delta: float, delay
         b = bucket[bucket_key]
         b.sort(key=lambda x: x[0])
 
-        ts_ns = bucket_key * NANOS_PER_MINUTE
+        ts_ns = bucket_key * bucket_ns
         ts_sec = ts_ns / 1_000_000_000
         ts_iso = datetime.datetime.fromtimestamp(ts_sec, tz=datetime.timezone.utc).isoformat()
 
@@ -364,7 +366,7 @@ def process_day(ticker: str, day: datetime.date, client, cum_delta: float, delay
 
 
 def rollup_rows(rows: list[dict], multiplier: int, timespan: str) -> list[dict]:
-    if multiplier == 1 and timespan == "minute":
+    if multiplier == 1 and timespan in ("second", "minute"):
         return rows
     window_ns = multiplier * NANOS_PER_MINUTE
     if timespan == "hour":
@@ -427,6 +429,7 @@ def rollup_rows(rows: list[dict], multiplier: int, timespan: str) -> list[dict]:
 
 def process_ticker(ticker: str, year: str, agg: str, parquet: bool, client, delay: float = 0.1, start_date: str | None = None, output_dir: str | None = None) -> tuple[int, int]:
     multiplier, timespan, _ = AGGREGATE_MAP[agg]
+    bucket_ns = NANOS_PER_SECOND if timespan == "second" else NANOS_PER_MINUTE
     trade_dates = list(trading_days(year))
     if start_date:
         start = datetime.date.fromisoformat(start_date)
@@ -438,7 +441,7 @@ def process_ticker(ticker: str, year: str, agg: str, parquet: bool, client, dela
     out.parent.mkdir(parents=True, exist_ok=True)
 
     for d in trade_dates:
-        day_rows, cum_delta = process_day(ticker, d, client, cum_delta, delay=delay)
+        day_rows, cum_delta = process_day(ticker, d, client, cum_delta, delay=delay, bucket_ns=bucket_ns)
         if day_rows:
             rolled = rollup_rows(day_rows, multiplier, timespan)
             _append_rows(out, rolled, parquet)
@@ -603,6 +606,8 @@ def main():
     else:
         status = "ok" if downloaded > 0 else "no_data" if any(r["status"] == "no_data" for r in results) else "unknown"
     print("PARALLEL_RESULT:{\"status\": \"%s\", \"downloaded\": %d}" % (status, downloaded), flush=True)
+    sys.stderr.write("PARALLEL_RESULT:{\"status\": \"%s\", \"downloaded\": %d}\n" % (status, downloaded))
+    sys.stderr.flush()
 
 
 if __name__ == "__main__":
