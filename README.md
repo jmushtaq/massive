@@ -249,3 +249,13 @@ gzip 2003/*.csv && gzip 2004/*.csv && gzip 2005/*.csv && gzip 2006/*.csv && gzip
 python scripts/options/stock_options_from_flatfiles_parallel_download.py --tickers_file data/universes/2025/combined_unique.csv --year 2025 --spawn 16 --use_local_cache --output data/combined &
 
 
+
+
+----
+python scripts/options/options_chain_discover.py --ohlcv_tickers --year 2025
+python scripts/options/stock_options_from_flatfiles_parallel_download.py --download_only --year 2025 --spawn 100
+python scripts/options/stock_options_from_flatfiles_parallel_download.py --download_only --year 2025 --spawn 100 --aggregate 1sec
+python scripts/options/options_chain_parallel_status.py --year 2025 --watch
+ll data/options/chains/2025/
+
+python scripts/options/options_chain_download.py --tickers CLF --year 2025 --aggregate 1sec --delay 0.1 --no_rename

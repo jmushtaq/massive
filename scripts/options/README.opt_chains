@@ -1,0 +1,141 @@
+# Options Chain Download
+
+Downloads 1-minute aggregate bars for individual option contracts via the Massive REST API, with split-adjusted prices (`adjusted=True`). Designed to capture a tradable subset of the options chain (ATM ±10-20% moneyness) rather than every listed contract.
+
+## Scripts
+
+| Script | Purpose |
+|---|---|
+| `options_chain_discover.py` | Queries `list_options_contracts` to build a contract manifest CSV |
+| `options_chain_download.py` | Downloads 1-min aggregates per contract, merges with underlying OHLCV |
+| `options_chain_parallel_download.py` | Parallel dispatcher — spawns workers, tracks state, resume support |
+| `options_chain_parallel_status.py` | Status monitor — `--watch` / `--kill` support |
+
+## Workflow
+
+```bash
+# 1. Discover contracts (one API call per ticker, paginated)
+python scripts/options/options_chain_discover.py --ohlcv_tickers --year 2025
+python scripts/options/options_chain_discover.py --tickers AAPL,TSLA --year 2025
+python scripts/options/options_chain_discover.py --tickers_file data/universes/2025/combined_unique.csv --year 2025
+
+# 2. Download chains (parallel, ~2-3 API calls per contract)
+python scripts/options/options_chain_parallel_download.py --ohlcv_tickers --year 2025 --spawn 50
+python scripts/options/options_chain_parallel_download.py --tickers AAPL --year 2025 --spawn 16
+python scripts/options/options_chain_parallel_download.py --tickers AAPL --year 2025 --aggregate 1sec --spawn 16
+python scripts/options/options_chain_parallel_download.py --tickers_file /tmp/missing.txt --year 2025 --spawn 50 --resume
+
+# 3. Monitor
+python scripts/options/options_chain_parallel_status.py --year 2025 --watch
+python scripts/options/options_chain_parallel_status.py --year 2025 --aggregate 1sec --watch
+
+# 4. Kill if needed
+python scripts/options/options_chain_parallel_status.py --year 2025 --kill
+
+# 5. Resume from interrupted run
+rm data/options/chains/.parallel_state_2025_1min_chains.json
+python scripts/options/options_chain_parallel_download.py --ohlcv_tickers --year 2025 --spawn 50 --resume
+```
+
+## Arguments (parallel dispatcher)
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `--tickers` | No* | — | Comma-separated ticker symbols |
+| `--tickers_file` | No* | — | Path to CSV with `ticker` column |
+| `--ohlcv_tickers` | No* | — | Derive tickers from `data/SPY/1min/<year>/` |
+| `--year` | Yes | — | Year, e.g. `2025` |
+| `--aggregate` | No | `1min` | `1min` or `1sec` |
+| `--spawn` | Yes | — | Number of parallel worker processes |
+| `--resume` | No | off | Skip tickers with existing output files |
+| `--output` | No | `data/` | Base output directory |
+| `--check` | No | — | Skip tickers with files in `<dir>/options/chains/<agg>/<year>/` |
+| `--delay` | No | `0.1` | Sleep seconds between API calls in workers |
+| `--logs` | No | off | Save dispatcher log file |
+| `--manifest` | No | `data/options/chains/contract_manifest_<year>.csv` | Custom manifest path |
+
+*One of `--tickers`, `--tickers_file`, or `--ohlcv_tickers` is required.
+
+## Arguments (discovery)
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `--moneyness_pct` | No | `0.20` | Max absolute moneyness as fraction (±20%) |
+| `--delay` | No | `0.25` | Sleep seconds between API calls |
+
+## Output layout
+
+```
+data/options/chains/
+├── contract_manifest_<year>.csv    ← Contract discovery output
+├── .parallel_state_<year>_<agg>_chains.json  ← Dispatcher state
+├── parallel_report_<year>_<agg>_chains.json  ← Run report
+├── logs/                           ← Log files
+├── 1min/
+│   └── <year>/
+│       ├── <ticker>_<year>_1min_chains.csv  ← Final output
+│       ├── processing/             ← Staging (in-progress files)
+│       ├── no_data/                ← Header-only files (no data)
+│       └── errors/                 ← Failed downloads
+└── 1sec/
+    └── <year>/
+        ├── <ticker>_<year>_1sec_chains.csv
+        └── ...
+```
+
+With `--output <dir>`:
+```
+<dir>/options/chains/<agg>/<year>/<ticker>_<year>_<agg>_chains.csv
+```
+
+## Output columns (31)
+
+```
+ticker, timestamp, contract_symbol, strike, call_put, expiry, days_to_expiry,
+expiry_type, open, high, low, close, volume, vwap, transactions,
+underlying_price, moneyness,
+intrinsic_value, extrinsic_value, mid,
+bid, ask, spread, implied_volatility, delta, gamma, theta, vega
+```
+
+- **Fully populated**: `ticker` through `transactions` (from aggs), `expiry_type` (computed), `underlying_price` through `moneyness` (from OHLCV join + computed), `intrinsic_value`, `extrinsic_value`, `mid` (computed)
+- **Forward-filled**: `close` and `underlying_price` carry forward the last known value when an API bar has no trade or when timestamp alignment misses the stock minute
+- **Computed fields**:
+  - `intrinsic_value` = max(underlying - strike, 0) for calls; max(strike - underlying, 0) for puts
+  - `extrinsic_value` = close - intrinsic_value
+  - `mid` = close (as best available; bid/ask reserved for future quotes join)
+  - `expiry_type` = Monthly (3rd Friday), Weekly (other Fridays or DTE ≤ 7), sorted by convention
+  - `moneyness` = (strike - underlying_price) / underlying_price
+- **Placeholder (empty)**: `bid`, `ask`, `spread`, `implied_volatility`, `delta`, `gamma`, `theta`, `vega` — computed later
+
+## Contract filtering (discovery)
+
+Contracts are filtered by:
+1. **Expiration range**: `year-01-01` to `(year+1)-03-31`
+2. **Moneyness**: `|strike - mid_price| / mid_price ≤ moneyness_pct` (default ±20%)
+3. **Underlying price range**: derived from `data/SPY/1min/<year>/` (or `data/SPY/1D/` fallback)
+
+## Staging and finalization
+
+- Workers write to `processing/<ticker>_<year>_chains.csv`
+- On success, the dispatcher renames `processing/` → final immediately (per-ticker, no batch finalization)
+- Files with only a header row go to `no_data/`
+- Failed downloads (exceptions) go to `errors/`
+- `--resume` checks the final directory only (not `processing/`)
+
+## API details
+
+- **`list_options_contracts`**: Paginated, `expired=True` for historical contracts, up to 1000 per page
+- **`list_aggs`**: `adjusted=True`, 50K bars per call limit, ~2-3 calls per contract per year
+- Each ticker typically has 2,000-5,000 contracts within 20% moneyness, most with negligible volume
+- API call count scales with contract count, not trading activity — use `--spawn` conservatively
+
+## Notes
+
+- `adjusted=True` is applied server-side — all prices are split-adjusted
+- Underlying OHLCV reads from `data/SPY/1min/<year>/` (.csv or .csv.gz)
+- Contract symbols use standard OCC format: `O:<TICKER><YYMMDD><C|P><strike*1000>`
+- IV and Greeks placeholders are left empty — compute locally with your preferred pricing library
+- `close` and `underlying_price` are forward-filled per contract: if a minute bar has no trade, or the underlying OHLCV has no matching timestamp, the last known value carries forward
+- `mid` currently holds the `close` price; when bid/ask data becomes available (quotes_v1 S3 flat files or snapshots), `mid = (bid + ask) / 2`
+- `expiry_type` classification: 3rd Friday → Monthly, other Friday or DTE ≤ 7 → Weekly
