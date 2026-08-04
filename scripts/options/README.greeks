@@ -1,0 +1,119 @@
+# Greeks and Implied Volatility Computation
+
+Computes Black-Scholes implied volatility, delta, gamma, theta, vega, and rho for option contracts using per-contract aggregate bars. Writes **separate output files** — never modifies downloaded data.
+
+Requires treasury yield curve data for risk-free rate interpolation.
+
+## Prerequisites
+
+```bash
+# One-time: download US Treasury yield curve (2003–present)
+python scripts/options/download_treasury_yields.py
+# Output: data/treasury-yields/treasury_yields.csv
+```
+
+## Chain Greeks
+
+Computes IV and Greeks for individual option contracts from the chain download pipeline.
+
+| Script | Purpose |
+|---|---|
+| `compute_chain_greeks.py` | Single-ticker worker |
+| `compute_chain_greeks_parallel_download.py` | Parallel dispatcher |
+| `compute_chain_greeks_parallel_status.py` | Status monitor |
+
+```bash
+# Prerequisites: chain data must exist
+python scripts/options/options_chain_discover.py --ohlcv_tickers --year 2025
+python scripts/options/options_chain_parallel_download.py --ohlcv_tickers --year 2025 --spawn 50
+
+# Compute Greeks
+python scripts/options/compute_chain_greeks_parallel_download.py --ohlcv_tickers --year 2025 --spawn 16
+python scripts/options/compute_chain_greeks_parallel_status.py --year 2025 --watch
+```
+
+### Input
+`data/options/chains/<agg>/<year>/<ticker>_<year>_<agg>_chains.csv`
+
+### Output (13 columns)
+`data/options/chains/<agg>/<year>/<ticker>_<year>_<agg>_chains_greeks.csv`
+
+```
+ticker, timestamp, contract_symbol, strike, call_put, expiry,
+days_to_expiry, implied_volatility, delta, gamma, theta, vega, rho
+```
+
+### Computation per row
+- Uses `close` as option price, `underlying_price` as spot
+- Skips row if close ≤ intrinsic_value (no time premium) or missing data
+- Newton-Raphson IV solver (20 iterations, sigma ∈ [0.001, 5.0])
+- Risk-free rate: linear interpolation of treasury yield curve by DTE
+
+## Options Features Greeks
+
+Computes IV and Greeks for ATM and 30-day contracts from the options features pipeline.
+
+| Script | Purpose |
+|---|---|
+| `compute_stocks_greeks.py` | Single-ticker worker |
+| `compute_stocks_greeks_parallel_download.py` | Parallel dispatcher |
+| `compute_stocks_greeks_parallel_status.py` | Status monitor |
+
+```bash
+# Prerequisites: options features data must exist (from stock_options_from_flatfiles)
+python scripts/options/compute_stocks_greeks_parallel_download.py --ohlcv_tickers --year 2025 --spawn 16
+python scripts/options/compute_stocks_greeks_parallel_status.py --year 2025 --watch
+```
+
+### Input
+`data/options/stocks/<agg>/<year>/<ticker>_<year>_<agg>_options.csv`
+
+### Output (26 columns)
+`data/options/stocks/<agg>/<year>/<ticker>_<year>_<agg>_options_greeks.csv`
+
+```
+ticker, timestamp,
+atm_call_iv, atm_call_delta, atm_call_gamma, atm_call_theta, atm_call_vega, atm_call_rho,
+atm_put_iv, atm_put_delta, atm_put_gamma, atm_put_theta, atm_put_vega, atm_put_rho,
+iv30d_call_iv, iv30d_call_delta, iv30d_call_gamma, iv30d_call_theta, iv30d_call_vega, iv30d_call_rho,
+iv30d_put_iv, iv30d_put_delta, iv30d_put_gamma, iv30d_put_theta, iv30d_put_vega, iv30d_put_rho
+```
+
+### Contracts computed per row
+| Prefix | Price source | Strike source | DTE source | Type |
+|---|---|---|---|---|
+| `atm_call` | `atm_call_close` | `atm_strike` | `atm_days_to_expiry` | Call |
+| `atm_put` | `atm_put_close` | `atm_strike` | `atm_days_to_expiry` | Put |
+| `iv30d_call` | `iv30d_call_close` | `iv30d_strike` | `iv30d_days_to_expiry` | Call |
+| `iv30d_put` | `iv30d_put_close` | `iv30d_strike` | `iv30d_days_to_expiry` | Put |
+
+## Arguments (all compute scripts)
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `--tickers` | No* | — | Comma-separated symbols |
+| `--tickers_file` | No* | — | CSV with `ticker` column |
+| `--ohlcv_tickers` | No* | — | Derive tickers from `data/SPY/1min/<year>/` |
+| `--year` | Yes | — | Year, e.g. `2025` |
+| `--aggregate` | No | `1min` | `1sec`, `1min`, `5min`, `15min`, `1H`, `4H`, `1D` |
+| `--output` | No | `data/` | Base output directory |
+| `--resume` | No | off | Skip tickers with existing output |
+| `--yields_file` | No | `data/treasury-yields/treasury_yields.csv` | Yield curve path |
+
+*One of these ticker sources is required. Parallel scripts additionally require `--spawn N`.
+
+## Black-Scholes implementation
+
+- No external dependencies — uses `math.erf` and `math.exp` only (no scipy)
+- Normal CDF: `0.5 * (1 + erf(x / sqrt(2)))`
+- IV solver: Newton-Raphson, initial guess σ = 0.3, convergence threshold 0.0001
+- Greeks: analytic partial derivatives of BS formula
+- Vega and Rho scaled to 1% change (standard convention)
+- Theta annualized then divided by 365 for per-day value
+
+## Notes
+
+- Input files are never modified — Greeks written to separate `*_greeks.csv` files
+- Join with input using Pandas: `df.merge(greeks_df, on=['ticker', 'timestamp', 'contract_symbol'])`
+- Chain Greeks skip rows where close ≤ intrinsic_value (deep ITM, no time premium to solve)
+- Treasury yields fallback to 4.0% flat rate if file not found

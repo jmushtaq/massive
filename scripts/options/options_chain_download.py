@@ -50,6 +50,11 @@ SCRIPT_NAME = Path(__file__).resolve().stem
 AGGREGATE_MAP = {
     "1sec": (1, "second", "1sec"),
     "1min": (1, "minute", "1min"),
+    "5min": (5, "minute", "5min"),
+    "15min": (15, "minute", "15min"),
+    "1H": (1, "hour", "1H"),
+    "4H": (4, "hour", "4H"),
+    "1D": (1, "day", "1D"),
 }
 
 CHAIN_HEADERS = [

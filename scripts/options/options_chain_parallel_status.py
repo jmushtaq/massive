@@ -23,6 +23,11 @@ from pathlib import Path
 AGGREGATE_MAP = {
     "1sec": "1sec",
     "1min": "1min",
+    "5min": "5min",
+    "15min": "15min",
+    "1H": "1H",
+    "4H": "4H",
+    "1D": "1D",
 }
 
 

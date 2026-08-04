@@ -259,3 +259,22 @@ python scripts/options/options_chain_parallel_status.py --year 2025 --watch
 ll data/options/chains/2025/
 
 python scripts/options/options_chain_download.py --tickers CLF --year 2025 --aggregate 1sec --delay 0.1 --no_rename
+
+-----------
+Treasury Yields
+python scripts/options/download_treasury_yields.py
+
+Greeks
+python scripts/options/compute_chain_greeks_parallel_download.py --tickers AAPL --year 2025 --aggregate 1sec --spawn 1
+python scripts/options/compute_chain_greeks_parallel_download.py --ohlcv_tickers --year 2025 --aggregate 1sec --spawn 16
+python scripts/options/compute_chain_greeks_parallel_status.py --year 2025 --aggregate --watch
+     - Input: data/options/chains/<agg>/<year>/<ticker>_<year>_<agg>_chains.csv
+     - Output: ..._chains_greeks.csv (13 cols: ticker, timestamp, contract_symbol, strike, call_put, expiry, DTE, iv, delta, gamma, theta, vega, rho)
+     - Per-contract IV via Newton-Raphson (20 iterations), risk-free rate interpolated from yield curve
+
+python scripts/options/compute_stocks_greeks_parallel_download.py --ohlcv_tickers --year 2025 --aggregate 1sec --spawn 16
+python scripts/options/compute_stocks_greeks_parallel_status.py --year 2025 --aggregate 1sec --watch
+     - Input: data/options/stocks/<agg>/<year>/<ticker>_<year>_<agg>_options.csv
+     - Output: ..._options_greeks.csv (26 cols: ticker, timestamp, 6 greeks × 4 contracts — atm_call, atm_put, iv30d_call, iv30d_put)
+     - Skips rows with no time premium (close ≤ intrinsic)
+

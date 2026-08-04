@@ -63,7 +63,7 @@ def parse_args():
                         help="Base output directory (default: data/)")
     parser.add_argument("--moneyness_pct", type=float, default=0.20,
                         help="Max absolute moneyness as fraction (default: 0.20 = ±20%% of underlying)")
-    parser.add_argument("--aggregate", choices=["1sec", "1min"], default="1min",
+    parser.add_argument("--aggregate", choices=["1sec", "1min", "5min", "15min", "1H", "4H", "1D"], default="1min",
                         help="Aggregate window size (default: 1min, for CLI consistency)")
     parser.add_argument("--delay", type=float, default=0.25,
                         help="Sleep seconds between API calls (default: 0.25)")
