@@ -295,3 +295,4 @@ python scripts/options/compute_stocks_greeks_parallel_status.py --year 2025 --ag
 python scripts/stocks_aggs_download.py --tickers "I:VIX,I:VXN,I:VVIX,I:RVX" --year 2025 --aggregate 1min --output data/vix --UTC
 python scripts/stocks_aggs_download.py --tickers_file data/universes/idx_tickers.txt --year 2025 --aggregate 1min --output data/vix --UTC
 ll data/vix/1min/2025
+
