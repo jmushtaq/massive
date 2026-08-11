@@ -296,3 +296,4 @@ python scripts/stocks_aggs_download.py --tickers "I:VIX,I:VXN,I:VVIX,I:RVX" --ye
 python scripts/stocks_aggs_download.py --tickers_file data/universes/idx_tickers.txt --year 2025 --aggregate 1min --output data/vix --UTC
 ll data/vix/1min/2025
 
+
