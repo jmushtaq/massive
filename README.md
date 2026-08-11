@@ -1,5 +1,7 @@
 # massive
 
+scp data/scalping_analysis_2025.xlsx ubuntu@192.168.0.95:~/projects/massive/data/
+
 # Create list of tickers from filenames in folder
 ```
 { echo "ticker"; ls data/quotes/1min/2024/processing/ | cut -d'_' -f1; } > /tmp/processing_2024_tickers.csv
@@ -296,4 +298,10 @@ python scripts/stocks_aggs_download.py --tickers "I:VIX,I:VXN,I:VVIX,I:RVX" --ye
 python scripts/stocks_aggs_download.py --tickers_file data/universes/idx_tickers.txt --year 2025 --aggregate 1min --output data/vix --UTC
 ll data/vix/1min/2025
 
+---------------
 
+# Strategy Analysis
+
+python scripts/strategy/scalping/scalping_analysis.py --year 2025 --top_n 40 --num_trades 50 --risk-amount 1 --strategies 'VWAP Reversion' --rr 2.0 --nprocs 12 --output data/scalping_multi_2025_v2.xlsx
+
+python scripts/strategy/scalping/scalping_analysis.py --year 2025 --top_n 40 --num_trades 100 --risk-amount 1 --nprocs 12 --output data/scalping_multi_2025.xlsx
