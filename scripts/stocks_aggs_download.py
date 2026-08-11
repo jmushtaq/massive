@@ -127,7 +127,13 @@ def parse_args():
         "--output",
         type=str,
         default=None,
-        help="Base output directory (default: data/). Inferred aggregate/year subdirs are appended.",
+        help="Base output directory (default: data/)",
+    )
+    parser.add_argument(
+        "--UTC",
+        action="store_true",
+        default=False,
+        help="Store timestamps in UTC instead of local timezone (AWST). Use this for new downloads. Existing data may be in AWST.",
     )
     return parser.parse_args()
 
@@ -209,12 +215,13 @@ def parse_years(year_arg: str) -> list[str]:
         raise SystemExit(f"Error: invalid year format '{year_arg}' (use YYYY or YYYY-YYYY)")
 
 
-def build_rows(aggs):
+def build_rows(aggs, use_utc: bool = False):
+    tz = datetime.timezone.utc if use_utc else None
     for a in aggs:
         if isinstance(a, Agg) and isinstance(a.timestamp, int):
             yield {
                 "timestamp": datetime.datetime.fromtimestamp(
-                    a.timestamp / 1000
+                    a.timestamp / 1000, tz=tz
                 ).isoformat(),
                 "open": a.open,
                 "high": a.high,
@@ -227,10 +234,12 @@ def build_rows(aggs):
             }
 
 
-def download_ticker(client, ticker: str, year: str, agg: str, parquet: bool = False, start_date: str | None = None, output_dir: str | None = None) -> int:
+def download_ticker(client, ticker: str, year: str, agg: str, parquet: bool = False, start_date: str | None = None, output_dir: str | None = None, use_utc: bool = False) -> int:
     from_date = start_date or f"{year}-01-01"
     to_date = f"{year}-12-31"
     multiplier, timespan, _ = agg_params(agg)
+
+    tz = datetime.timezone.utc if use_utc else None
 
     proc_path = output_path(ticker, year, agg, parquet, output_dir, subdir="processing")
     proc_path.parent.mkdir(parents=True, exist_ok=True)
@@ -257,7 +266,7 @@ def download_ticker(client, ticker: str, year: str, agg: str, parquet: bool = Fa
         ):
             if isinstance(a, Agg) and isinstance(a.timestamp, int):
                 batch.append({
-                    "timestamp": datetime.datetime.fromtimestamp(a.timestamp / 1000).isoformat(),
+                    "timestamp": datetime.datetime.fromtimestamp(a.timestamp / 1000, tz=tz).isoformat(),
                     "open": a.open,
                     "high": a.high,
                     "low": a.low,
@@ -292,7 +301,7 @@ def download_ticker(client, ticker: str, year: str, agg: str, parquet: bool = Fa
             ):
                 if isinstance(a, Agg) and isinstance(a.timestamp, int):
                     writer.writerow({
-                        "timestamp": datetime.datetime.fromtimestamp(a.timestamp / 1000).isoformat(),
+                        "timestamp": datetime.datetime.fromtimestamp(a.timestamp / 1000, tz=tz).isoformat(),
                         "open": a.open,
                         "high": a.high,
                         "low": a.low,
@@ -378,7 +387,7 @@ def main():
 
             t0 = time.time()
             try:
-                count = download_ticker(client, ticker, year, agg, args.parquet, args.start_date, out_dir)
+                count = download_ticker(client, ticker, year, agg, args.parquet, args.start_date, out_dir, use_utc=args.UTC)
             except Exception as e:
                 elapsed = time.time() - t0
                 logger.error("[%d/%d] %s (%s) -> FAILED after %.1fs: %s", i, len(tickers), ticker, year, elapsed, e)

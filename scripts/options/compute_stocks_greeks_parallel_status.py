@@ -17,7 +17,7 @@ AGGREGATE_MAP = {
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Monitor stocks greeks compute progress")
+    p = argparse.ArgumentParser(description="Monitor stocks greeks progress")
     p.add_argument("--year", type=str, required=True)
     p.add_argument("--aggregate", choices=list(AGGREGATE_MAP.keys()), default="1min")
     p.add_argument("--watch", action="store_true", default=False)
@@ -47,7 +47,7 @@ def find_state_files(year, agg, odir=None):
             files.append(p)
     if not files:
         for d in dirs:
-            for p in d.glob(f".parallel_state_*_options_greeks.json"):
+            for p in d.glob(".parallel_state_*_options_greeks.json"):
                 files.append(p)
     return sorted(files)
 

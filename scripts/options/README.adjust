@@ -35,7 +35,7 @@ python scripts/corporate_actions_download.py --tickers_file data/universes/2025/
 # Preview what would change (no files written)
 python scripts/options/adjust_options_for_splits.py --year 2023 --dry-run
 
-# Adjust specific year
+# Adjust specific year (backed up to split-unadjusted/, written in-place)
 python scripts/options/adjust_options_for_splits.py --year 2023
 
 # Adjust multiple years
@@ -66,7 +66,8 @@ python scripts/options/adjust_options_for_splits.py --year 2023 --splits_file /p
 
 | Mode | Output path |
 |---|---|
-| Default | `data/options/stocks/<agg>/<year>/adjusted/<ticker>_<year>_<agg>_options.csv` |
+| Default | `data/options/stocks/<agg>/<year>/<ticker>_<year>_<agg>_options.csv` (adjusted, in-place) |
+| Backup | `data/options/stocks/<agg>/<year>/split-unadjusted/<ticker>_<year>_<agg>_options.csv` (original, moved) |
 | `--output <dir>` | `<dir>/options/stocks/<agg>/<year>/<ticker>_<year>_<agg>_options.csv` |
 
 Original files are never overwritten.

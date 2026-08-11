@@ -7,11 +7,11 @@ adjustment factors to option-specific columns. Underlying OHLCV columns (open, h
 low, close, vwap, underlying_price) are already adjusted by the API and are left
 as-is.
 
-Output is written to an `adjusted/` subdirectory within each year's output folder
-by default, or to a custom base directory via --output.
+Original unadjusted files are first moved to a `split-unadjusted/` subdirectory,
+then adjusted files are written in-place to the main directory.
 
 Usage:
-    # Adjust specific year (writes to adjusted/ subdir within the year folder)
+    # Adjust specific year (backs up to split-unadjusted/, writes adjusted files in-place)
     python scripts/options/adjust_options_for_splits.py --year 2023
 
     # Adjust multiple years
@@ -20,11 +20,14 @@ Usage:
     # Custom input directory (CSV files at <input>/<year>/<ticker>_...csv)
     python scripts/options/adjust_options_for_splits.py --year 2023 --input /tmp/options_staging
 
-    # Write to custom output base
+    # Write to custom output base (instead of in-place)
     python scripts/options/adjust_options_for_splits.py --year 2023 --output data/options/stocks_adjusted
 
     # Dry-run (no changes, report only)
     python scripts/options/adjust_options_for_splits.py --year 2023 --dry-run
+
+After running, the original files are in split-unadjusted/ and adjusted files replace
+the originals in the main directory.
 """
 
 import argparse
@@ -390,20 +393,44 @@ def main():
         logger.info("")
         logger.info("--- Year %s (%d files) ---", year, len(opts_files))
 
+        backup_dir = input_dir / "split-unadjusted"
+
+        # Guard: if split-unadjusted already has files, the data was already adjusted
+        if not args.dry_run and backup_dir.exists():
+            existing = list(backup_dir.glob("*.csv"))
+            if existing:
+                raise SystemExit(
+                    "Error: split-unadjusted/ already contains %d file(s) "
+                    "(e.g. %s). Data appears already adjusted. "
+                    "Move files back to %s and retry if you need to re-run."
+                    % (len(existing), existing[0].name, input_dir)
+                )
+
+        adjusted_tickers: list[str] = []
+
         for input_path in opts_files:
             ticker = input_path.stem.split("_")[0]
             total_files += 1
 
             if output_base:
                 out_dir = output_base / "options" / "stocks" / AGGREGATE_MAP[args.aggregate] / year
+                output_path = out_dir / input_path.name
+                source_path = input_path
             else:
-                out_dir = input_dir / "adjusted"
-            output_path = out_dir / input_path.name
+                output_path = input_path
+                backup_path = backup_dir / input_path.name
+                if not args.dry_run:
+                    backup_dir.mkdir(parents=True, exist_ok=True)
+                    os.rename(str(input_path), str(backup_path))
+                    logger.info("  [move] %s -> split-unadjusted/", input_path.name)
+                    source_path = backup_path
+                else:
+                    source_path = input_path
 
             ticker_splits = all_splits.get(ticker, [])
 
             t0 = time.time()
-            stats = adjust_file(input_path, output_path, ticker_splits, logger, args.dry_run)
+            stats = adjust_file(source_path, output_path, ticker_splits, logger, args.dry_run)
             stats["ticker"] = ticker
             stats["year"] = year
             stats["elapsed_s"] = round(time.time() - t0, 2)
@@ -412,6 +439,8 @@ def main():
             total_rows += stats.get("rows", 0)
             total_adjusted += stats.get("adjusted_rows", 0)
             total_errors += stats.get("validation_errors", 0)
+            if stats.get("adjusted_rows", 0) > 0:
+                adjusted_tickers.append(ticker)
 
     total_time = time.time() - overall_start
     total_would_change = sum(s.get("adjusted_rows", 0) for s in all_stats if not s.get("skipped"))
@@ -427,6 +456,21 @@ def main():
         logger.info("  Would adjust:   %d rows", total_would_change)
     else:
         logger.info("  Validation err: %d", total_errors)
+    if adjusted_tickers:
+        logger.info("  Adjusted:       %d tickers: %s",
+                    len(adjusted_tickers), ", ".join(adjusted_tickers))
+        for year in years:
+            readme_path = year_dir_pattern / year / "README.adjusted_tickers"
+            if not args.dry_run:
+                readme_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(readme_path, "w") as f:
+                    f.write("# Split-adjusted tickers for year %s\n" % year)
+                    f.write("# Generated %s by %s\n" % (datetime.datetime.now().isoformat(), SCRIPT_NAME))
+                    f.write("# %d tickers had rows adjusted for stock splits\n" % len(adjusted_tickers))
+                    f.write("# Original files are in split-unadjusted/\n")
+                    f.write("\n")
+                    for t in sorted(adjusted_tickers):
+                        f.write(t + "\n")
     logger.info("=" * 60)
 
 

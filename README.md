@@ -260,6 +260,12 @@ ll data/options/chains/2025/
 
 python scripts/options/options_chain_download.py --tickers CLF --year 2025 --aggregate 1sec --delay 0.1 --no_rename
 
+------
+# Split Adjust the stock Options
+python scripts/options/adjust_options_for_splits.py --year 2014
+ll data/options/stocks/1min/2025/split-unadjusted/
+
+
 -----------
 Treasury Yields
 python scripts/options/download_treasury_yields.py
@@ -272,9 +278,20 @@ python scripts/options/compute_chain_greeks_parallel_status.py --year 2025 --agg
      - Output: ..._chains_greeks.csv (13 cols: ticker, timestamp, contract_symbol, strike, call_put, expiry, DTE, iv, delta, gamma, theta, vega, rho)
      - Per-contract IV via Newton-Raphson (20 iterations), risk-free rate interpolated from yield curve
 
+python scripts/options/compute_chain_greeks_parallel_download.py --ohlcv_tickers --year 2022 --spawn 24 --aggregate 1sec --exclude_tickers data/universes/excluded_tickers.txt &
+python scripts/options/compute_chain_greeks_parallel_status.py --year 2022 --aggregate 1sec --watch
+
 python scripts/options/compute_stocks_greeks_parallel_download.py --ohlcv_tickers --year 2025 --aggregate 1sec --spawn 16
 python scripts/options/compute_stocks_greeks_parallel_status.py --year 2025 --aggregate 1sec --watch
      - Input: data/options/stocks/<agg>/<year>/<ticker>_<year>_<agg>_options.csv
      - Output: ..._options_greeks.csv (26 cols: ticker, timestamp, 6 greeks × 4 contracts — atm_call, atm_put, iv30d_call, iv30d_put)
      - Skips rows with no time premium (close ≤ intrinsic)
 
+python scripts/options/compute_stocks_greeks_parallel_download.py --ohlcv_tickers --year 2025 --spawn 24 --aggregate 1min --exclude_tickers data/universes/excluded_tickers.txt &
+python scripts/options/compute_stocks_greeks_parallel_status.py --year 2025 --aggregate 1min --watch
+
+----
+# VIX
+python scripts/stocks_aggs_download.py --tickers "I:VIX,I:VXN,I:VVIX,I:RVX" --year 2025 --aggregate 1min --output data/vix --UTC
+python scripts/stocks_aggs_download.py --tickers_file data/universes/idx_tickers.txt --year 2025 --aggregate 1min --output data/vix --UTC
+ll data/vix/1min/2025

@@ -86,6 +86,7 @@ CHAIN_HEADERS = [
     "gamma",
     "theta",
     "vega",
+    "rho",
 ]
 
 
@@ -294,7 +295,7 @@ def download_contract_aggs(client: RESTClient, contract: dict, from_date: str,
                 "extrinsic_value": extrinsic_value,
                 "mid": close_str,
                 "bid": "", "ask": "", "spread": "",
-                "implied_volatility": "", "delta": "", "gamma": "", "theta": "", "vega": "",
+                "implied_volatility": "", "delta": "", "gamma": "", "theta": "", "vega": "", "rho": "",
             })
             written += 1
     except Exception as e:
