@@ -306,6 +306,10 @@ python scripts/strategy/scalping/scalping_analysis.py --year 2025 --top_n 40 --n
 
 python scripts/strategy/scalping/scalping_analysis.py --year 2025 --top_n 40 --num_trades 100 --risk-amount 1 --nprocs 12 --output data/scalping_multi_2025_v1.xlsx
 
+python scripts/strategy/scalping/scalping_analysis.py --year 2025 --aggregate 1sec --top_n 40 --num_trades 100 -risk-amount 1 --nprocs 12 --output data/scalping_multi_2025.xlsx
+
+python scripts/strategy/scalping/scalping_analysis.py --year 2026 --aggregate 1sec --top_n 40 --num_trades 100 --risk-amount 1 --nprocs 12 --strategies 'ORB + Volume Confluence' --output data/scalping_orb-volume_2026.xlsx
+
 scp data/scalping_analysis_2025_v1.xlsx ubuntu@192.168.0.95:~/projects/massive/data/
 
 
@@ -316,3 +320,10 @@ python scripts/options/update_ts_AWST_to_UTC_parallel_status.py --year 2025 --ag
 
 python scripts/options/update_ts_AWST_to_UTC_parallel.py --ohlcv_tickers --year 2003-2019 --aggregate 1min --spawn 16 &
 python scripts/options/update_ts_AWST_to_UTC_parallel.py --ohlcv_tickers --year 2018-2026 --aggregate 1sec --spawn 16 &
+
+
+-----
+python scripts/options/check_split_consistency.py --year 2018-2025 --aggregate 1sec
+python scripts/options/check_split_consistency.py --year 2014-2025 --aggregate 1min
+
+

@@ -11,6 +11,11 @@ Usage:
     source venv/bin/activate
     python scripts/strategy/scalping/scalping_analysis.py --year 2025 --top_n 40 --num_trades 50 --risk-amount 1 --strategies 'VWAP Reversion' --rr 2.0 --output data/scalping_multi_2025.xlsx
 
+Trade-window control (optional):
+    --num_trades N           cap trades backtested per strategy×R:R (default: all).
+    --date_range YYYYMMDD-YYYYMMDD   restrict the analysis to a date window.
+    If neither is given, the whole --year is used.
+
 Position sizing note:
     --risk-amount N  means "risk N% of starting-cash per trade" (actual dollars at risk).
     margin_used is NOT the same as risk — margin is the buying-power requirement
@@ -19,6 +24,7 @@ Position sizing note:
 """
 
 import argparse
+import datetime
 import logging
 import os
 import sys
@@ -52,12 +58,13 @@ TIME_ZONES = [
     ("15:00-16:00", (15, 0), (16, 0)),
 ]
 
-DATA_OHLCV = Path("data/SPY/1min")
-DATA_TRADES = Path("data/trades/1min")
-DATA_QUOTES = Path("data/quotes/1min")
-DATA_OPTIONS = Path("data/options/stocks/1min")
-DATA_CHAINS_1MIN = Path("data/options/chains/1min")
-DATA_CHAINS_1SEC = Path("data/options/chains/1sec")
+DATA_OHLCV = Path("data/SPY")
+DATA_TRADES = Path("data/trades")
+DATA_QUOTES = Path("data/quotes")
+DATA_OPTIONS = Path("data/options/stocks")
+DATA_CHAINS = Path("data/options/chains")
+
+DEFAULT_AGGREGATE = "1sec"
 
 ALL_STRATEGIES = [
     "Momentum Breakout",
@@ -87,12 +94,13 @@ ALL_STRATEGIES = [
 # SECTION 1: Data Availability Report & Loaders
 # ══════════════════════════════════════════════════════════════════════
 
-def _path(ticker: str, base: Path, year: str, suffix: str) -> Path:
-    return base / year / f"{ticker}_{year}_{suffix}.csv"
+def _path(ticker: str, base: Path, year: str, agg: str, kind: str = "") -> Path:
+    name = f"{ticker}_{year}_{agg}_{kind}.csv" if kind else f"{ticker}_{year}_{agg}.csv"
+    return base / agg / year / name
 
 
-def load_ohlcv(ticker: str, year: str) -> pd.DataFrame | None:
-    p = _path(ticker, DATA_OHLCV, year, "1min")
+def load_ohlcv(ticker: str, year: str, agg: str = DEFAULT_AGGREGATE) -> pd.DataFrame | None:
+    p = _path(ticker, DATA_OHLCV, year, agg)
     if not p.exists():
         return None
     df = pd.read_csv(p)
@@ -102,8 +110,8 @@ def load_ohlcv(ticker: str, year: str) -> pd.DataFrame | None:
     return df
 
 
-def load_trades(ticker: str, year: str) -> pd.DataFrame | None:
-    p = _path(ticker, DATA_TRADES, year, "1min_trades")
+def load_trades(ticker: str, year: str, agg: str = DEFAULT_AGGREGATE) -> pd.DataFrame | None:
+    p = _path(ticker, DATA_TRADES, year, agg, "trades")
     if not p.exists():
         return None
     df = pd.read_csv(p)
@@ -113,8 +121,8 @@ def load_trades(ticker: str, year: str) -> pd.DataFrame | None:
     return df
 
 
-def load_quotes(ticker: str, year: str) -> pd.DataFrame | None:
-    p = _path(ticker, DATA_QUOTES, year, "1min_quotes")
+def load_quotes(ticker: str, year: str, agg: str = DEFAULT_AGGREGATE) -> pd.DataFrame | None:
+    p = _path(ticker, DATA_QUOTES, year, agg, "quotes")
     if not p.exists():
         return None
     df = pd.read_csv(p)
@@ -124,8 +132,8 @@ def load_quotes(ticker: str, year: str) -> pd.DataFrame | None:
     return df
 
 
-def load_options_features(ticker: str, year: str) -> pd.DataFrame | None:
-    p = _path(ticker, DATA_OPTIONS, year, "1min_options")
+def load_options_features(ticker: str, year: str, agg: str = DEFAULT_AGGREGATE) -> pd.DataFrame | None:
+    p = _path(ticker, DATA_OPTIONS, year, agg, "options")
     if not p.exists():
         return None
     df = pd.read_csv(p)
@@ -135,11 +143,11 @@ def load_options_features(ticker: str, year: str) -> pd.DataFrame | None:
     return df
 
 
-def load_chains(ticker: str, year: str) -> pd.DataFrame | None:
-    """Load option chain data. Prefer 1sec, fall back to 1min."""
-    for base in (DATA_CHAINS_1SEC, DATA_CHAINS_1MIN):
-        suffix = {DATA_CHAINS_1SEC: "1sec_chains", DATA_CHAINS_1MIN: "1min_chains"}[base]
-        p = _path(ticker, base, year, suffix)
+def load_chains(ticker: str, year: str, agg: str = DEFAULT_AGGREGATE) -> pd.DataFrame | None:
+    """Load option chain data. Prefer `agg`, fall back to 1min."""
+    aggs = [agg] if agg == "1min" else [agg, "1min"]
+    for a in aggs:
+        p = _path(ticker, DATA_CHAINS, year, a, "chains")
         if p.exists():
             df = pd.read_csv(p)
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
@@ -147,23 +155,23 @@ def load_chains(ticker: str, year: str) -> pd.DataFrame | None:
     return None
 
 
-def report_data_availability(year: str) -> tuple[dict, dict]:
+def report_data_availability(year: str, agg: str = DEFAULT_AGGREGATE) -> tuple[dict, dict]:
     """Scan all data directories. Returns (per_ticker_map, counts)."""
-    ohlcv_dir = DATA_OHLCV / year
+    ohlcv_dir = DATA_OHLCV / agg / year
     tickers_all = sorted(
-        [f.stem.split("_")[0] for f in ohlcv_dir.glob(f"*_{year}_1min.csv")]
+        [f.stem.split("_")[0] for f in ohlcv_dir.glob(f"*_{year}_{agg}.csv")]
     ) if ohlcv_dir.exists() else []
 
     report = {}
     for t in tickers_all:
         report[t] = {
-            "OHLCV": _path(t, DATA_OHLCV, year, "1min").exists(),
-            "Trades": _path(t, DATA_TRADES, year, "1min_trades").exists(),
-            "Quotes": _path(t, DATA_QUOTES, year, "1min_quotes").exists(),
-            "Options": _path(t, DATA_OPTIONS, year, "1min_options").exists(),
+            "OHLCV": _path(t, DATA_OHLCV, year, agg).exists(),
+            "Trades": _path(t, DATA_TRADES, year, agg, "trades").exists(),
+            "Quotes": _path(t, DATA_QUOTES, year, agg, "quotes").exists(),
+            "Options": _path(t, DATA_OPTIONS, year, agg, "options").exists(),
             "Chains": (
-                _path(t, DATA_CHAINS_1SEC, year, "1sec_chains").exists()
-                or _path(t, DATA_CHAINS_1MIN, year, "1min_chains").exists()
+                _path(t, DATA_CHAINS, year, agg, "chains").exists()
+                or (agg != "1min" and _path(t, DATA_CHAINS, year, "1min", "chains").exists())
             ),
         }
 
@@ -305,18 +313,47 @@ def rsi_arr(close, period=14):
     return 100 - 100 / (1 + rs)
 
 
-def compute_daily_features(ticker: str, year: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+def _parse_date_range(date_range: str | None) -> tuple | None:
+    """Parse 'YYYYMMDD-YYYYMMDD' into (start_date, end_date) datetime.date tuple."""
+    if not date_range:
+        return None
+    parts = date_range.split("-")
+    if len(parts) != 2:
+        raise SystemExit("Error: --date_range must be YYYYMMDD-YYYYMMDD (e.g. 20250101-20250331)")
+    try:
+        start = datetime.datetime.strptime(parts[0].strip(), "%Y%m%d").date()
+        end = datetime.datetime.strptime(parts[1].strip(), "%Y%m%d").date()
+    except ValueError:
+        raise SystemExit("Error: --date_range must be YYYYMMDD-YYYYMMDD (e.g. 20250101-20250331)")
+    if end < start:
+        raise SystemExit("Error: --date_range end is before start")
+    return (start, end)
+
+
+def _filter_date_range(df: pd.DataFrame | None, date_range: tuple | None) -> pd.DataFrame | None:
+    """Restrict a DatetimeIndex-indexed frame to [start, end] (inclusive, UTC dates)."""
+    if df is None or date_range is None:
+        return df
+    start_d, end_d = date_range
+    start_ts = pd.Timestamp(start_d, tz="UTC")
+    end_ts = pd.Timestamp(end_d, tz="UTC") + pd.Timedelta(days=1)
+    return df[(df.index >= start_ts) & (df.index < end_ts)]
+
+
+def compute_daily_features(ticker: str, year: str, agg: str = DEFAULT_AGGREGATE,
+                           date_range: tuple | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Load all datasets, align, and compute daily opening features.
     Returns (aligned_minute_df, daily_rank_df)."""
 
-    ohlcv = load_ohlcv(ticker, year)
+    ohlcv = load_ohlcv(ticker, year, agg)
+    ohlcv = _filter_date_range(ohlcv, date_range)
     if ohlcv is None or len(ohlcv) < 500:
         return pd.DataFrame(), pd.DataFrame()
 
-    trades_df = load_trades(ticker, year)
-    quotes = load_quotes(ticker, year)
-    options = load_options_features(ticker, year)
-    chains = load_chains(ticker, year)
+    trades_df = _filter_date_range(load_trades(ticker, year, agg), date_range)
+    quotes = _filter_date_range(load_quotes(ticker, year, agg), date_range)
+    options = _filter_date_range(load_options_features(ticker, year, agg), date_range)
+    chains = load_chains(ticker, year, agg)
 
     # ── Build aligned 1-min dataframe ──
     df = ohlcv[["open", "high", "low", "close", "volume"]].copy()
@@ -1100,21 +1137,21 @@ def select_strategies(daily_row: pd.Series, enabled: list[str] | None = None) ->
 
 def _features_worker(args: tuple) -> tuple:
     """Worker: compute daily features for one ticker. Returns (ticker, daily_df)."""
-    ticker, year = args
-    _, daily_df = compute_daily_features(ticker, year)
+    ticker, year, agg, date_range = args
+    _, daily_df = compute_daily_features(ticker, year, agg, date_range)
     return ticker, daily_df
 
 
 def _backtest_worker(args: tuple) -> dict:
     """Worker: backtest one ticker across all strategies & R:R ratios.
     Must be module-level for pickle. Returns a dict of results."""
-    (ticker, year, avg_row_dict, enabled_strategies, rr_ratios,
+    (ticker, year, agg, date_range, avg_row_dict, enabled_strategies, rr_ratios,
      num_trades, capital_kwargs, time_zones_list) = args
 
     cap = CapitalManager(**capital_kwargs)
     time_zones = [(n, (sh, sm), (eh, em)) for n, (sh, sm), (eh, em) in time_zones_list]
 
-    df, _ = compute_daily_features(ticker, year)
+    df, _ = compute_daily_features(ticker, year, agg, date_range)
     if df.empty:
         return {"ticker": ticker,
                 "summaries": [], "portfolio": [], "trades": [],
@@ -1135,7 +1172,7 @@ def _backtest_worker(args: tuple) -> dict:
         for rr in rr_ratios:
             cap.reset()
             raw_trades = s_func(df, rr=rr)
-            if num_trades > 0 and len(raw_trades) > num_trades:
+            if num_trades and num_trades > 0 and len(raw_trades) > num_trades:
                 raw_trades = raw_trades[:num_trades]
             if not raw_trades:
                 continue
@@ -1376,14 +1413,16 @@ def run_pipeline(year: str, top_n: int, backtest_n: int, num_trades: int,
                  capital: CapitalManager, output_path: str,
                  enabled_strategies: list[str] | None = None,
                  rr_ratios: list[float] | None = None,
-                 nprocs: int = 1):
+                 nprocs: int = 1,
+                 aggregate: str = DEFAULT_AGGREGATE,
+                 date_range: tuple | None = None):
     if rr_ratios is None:
         rr_ratios = RR_RATIOS
     actual_nprocs = max(1, min(nprocs, os.cpu_count() or 1))
     t_start = time.time()
 
     # ── Data Availability Report ──
-    availability, counts = report_data_availability(year)
+    availability, counts = report_data_availability(year, aggregate)
     log.info("Data Availability Report:")
     for k, v in counts.items():
         log.info("  %s: %d stocks", k, v)
@@ -1404,7 +1443,7 @@ def run_pipeline(year: str, top_n: int, backtest_n: int, num_trades: int,
     all_daily = []
 
     if actual_nprocs > 1:
-        work_items = [(t, year) for t in target_tickers]
+        work_items = [(t, year, aggregate, date_range) for t in target_tickers]
         log.info("  Using %d processes for feature computation", actual_nprocs)
         with ProcessPoolExecutor(max_workers=actual_nprocs) as pool:
             futures = {pool.submit(_features_worker, w): w[0] for w in work_items}
@@ -1422,7 +1461,7 @@ def run_pipeline(year: str, top_n: int, backtest_n: int, num_trades: int,
                     log.info("  Processed %d/%d tickers", completed, len(target_tickers))
     else:
         for i, ticker in enumerate(target_tickers):
-            _, daily_df = compute_daily_features(ticker, year)
+            _, daily_df = compute_daily_features(ticker, year, aggregate, date_range)
             if not daily_df.empty:
                 all_daily.append(daily_df)
             if (i + 1) % 10 == 0:
@@ -1472,7 +1511,7 @@ def run_pipeline(year: str, top_n: int, backtest_n: int, num_trades: int,
             avg_row_dict = (ticker_daily.mean(numeric_only=True).to_dict()
                             if not ticker_daily.empty else {})
             work_items.append((
-                ticker, year, avg_row_dict, enabled_strategies, rr_ratios,
+                ticker, year, aggregate, date_range, avg_row_dict, enabled_strategies, rr_ratios,
                 num_trades, capital_kwargs, tz_serializable,
             ))
         with ProcessPoolExecutor(max_workers=actual_nprocs) as pool:
@@ -1496,7 +1535,7 @@ def run_pipeline(year: str, top_n: int, backtest_n: int, num_trades: int,
                 completed += 1
     else:
         for ticker in backtest_tickers:
-            df, _ = compute_daily_features(ticker, year)
+            df, _ = compute_daily_features(ticker, year, aggregate, date_range)
             if df.empty:
                 continue
 
@@ -1512,7 +1551,7 @@ def run_pipeline(year: str, top_n: int, backtest_n: int, num_trades: int,
                 for rr in rr_ratios:
                     capital.reset()
                     trades = s_func(df, rr=rr)
-                    if num_trades > 0 and len(trades) > num_trades:
+                    if num_trades and num_trades > 0 and len(trades) > num_trades:
                         trades = trades[:num_trades]
                     if not trades:
                         continue
@@ -2503,9 +2542,18 @@ def main():
         ),
     )
     parser.add_argument("--year", default="2025")
+    parser.add_argument("--aggregate", default=DEFAULT_AGGREGATE,
+                        choices=["1sec", "1min", "5min", "15min", "1H", "4H", "1D"],
+                        help="Bar aggregate to load (default: 1sec). Data files must exist "
+                             "under data/SPY/<agg>/<year>/ etc.")
     parser.add_argument("--top_n", type=int, default=40)
     parser.add_argument("--backtest_n", type=int, default=10)
-    parser.add_argument("--num_trades", type=int, default=0)
+    parser.add_argument("--num_trades", type=int, default=None,
+                        help="Cap the number of trades backtested per strategy×R:R "
+                             "(default: None = use all trades).")
+    parser.add_argument("--date_range", type=str, default=None,
+                        help="Restrict the analysis to a date window, YYYYMMDD-YYYYMMDD "
+                             "(e.g. 20250101-20250331). Default: the whole --year.")
     parser.add_argument("--starting-cash", type=float, default=100_000.0)
     parser.add_argument("--risk-amount", type=float, default=2.0,
                         help="Risk per trade as %% of starting cash (default: 2%%). "
@@ -2560,9 +2608,12 @@ def main():
         max_position_pct=args.max_position_pct / 100.0,
     )
 
+    date_range = _parse_date_range(args.date_range)
+
     os.makedirs(Path(args.output).parent, exist_ok=True)
     run_pipeline(args.year, args.top_n, args.backtest_n, args.num_trades,
-                 capital, args.output, enabled, rr_ratios, nprocs=args.nprocs)
+                 capital, args.output, enabled, rr_ratios, nprocs=args.nprocs,
+                 aggregate=args.aggregate, date_range=date_range)
 
 
 if __name__ == "__main__":
