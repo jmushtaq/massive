@@ -69,6 +69,17 @@ ALL_STRATEGIES = [
     "Quote Imbalance Breakout",
     "VWAP + Delta",
     "Liquidity Vacuum / Exhaustion Fade",
+    "VWAP + Momentum Confluence",
+    "VWAP + Quote Imbalance Confluence",
+    "VWAP + Delta Confluence",
+    "VWAP Triple Confluence",
+    "RSI + Momentum Confluence",
+    "RSI + Delta Confluence",
+    "EMA + Momentum Confluence",
+    "EMA + Delta Confluence",
+    "ORB + Volume Confluence",
+    "Momentum + Quote Confluence",
+    "Momentum + Delta + Quote Confluence",
 ]
 
 
@@ -857,6 +868,116 @@ def backtest_liquidity_vacuum(df, rr=1.5, max_bars=15):
     return results
 
 
+# ── Confluence / Multi-Factor Signal Matching ──
+
+def _signal_index(trades: list[dict]) -> set:
+    """Extract (entry_time, direction) for each trade as a set for fast lookup."""
+    return {(t["entry_time"], t["direction"]) for t in trades}
+
+
+def _confluence_filter(primary_trades: list[dict], confirmation_sets: list[set],
+                       min_confirmations: int = 1) -> list[dict]:
+    """Return primary trades where at least `min_confirmations` confirmation sets
+    agree on direction at the same entry bar (±0 tolerance)."""
+    if not confirmation_sets:
+        return primary_trades
+    confirmed = []
+    for t in primary_trades:
+        key = (t["entry_time"], t["direction"])
+        matches = sum(1 for cs in confirmation_sets if key in cs)
+        if matches >= min_confirmations:
+            confirmed.append(t)
+    return confirmed
+
+
+# ── Multi-Factor Confluence Strategies ──
+
+def backtest_vwap_momentum_confluence(df, rr=1.5, max_bars=20):
+    """VWAP Reversion with Momentum Breakout confluence.
+    Only take VWAP reversion trades where Momentum also signals same direction."""
+    primary = backtest_vwap_reversion(df, rr=rr, max_bars=max_bars)
+    conf_trades = backtest_momentum_breakout(df, rr=rr, max_bars=max_bars)
+    return _confluence_filter(primary, [_signal_index(conf_trades)], min_confirmations=1)
+
+
+def backtest_vwap_quote_confluence(df, rr=1.5, max_bars=20):
+    """VWAP Reversion with Quote Imbalance Breakout confluence."""
+    primary = backtest_vwap_reversion(df, rr=rr, max_bars=max_bars)
+    conf_trades = backtest_quote_imbalance_breakout(df, rr=rr, max_bars=max_bars)
+    return _confluence_filter(primary, [_signal_index(conf_trades)], min_confirmations=1)
+
+
+def backtest_vwap_delta_confluence(df, rr=1.5, max_bars=20):
+    """VWAP Reversion with Delta Confirmation Breakout confluence."""
+    primary = backtest_vwap_reversion(df, rr=rr, max_bars=max_bars)
+    conf_trades = backtest_delta_breakout(df, rr=rr, max_bars=max_bars)
+    return _confluence_filter(primary, [_signal_index(conf_trades)], min_confirmations=1)
+
+
+def backtest_vwap_triple_confluence(df, rr=1.5, max_bars=20):
+    """VWAP Reversion requiring ≥2 of [Momentum, Quote Imbalance, Delta] to agree."""
+    primary = backtest_vwap_reversion(df, rr=rr, max_bars=max_bars)
+    conf_sets = [
+        _signal_index(backtest_momentum_breakout(df, rr=rr, max_bars=max_bars)),
+        _signal_index(backtest_quote_imbalance_breakout(df, rr=rr, max_bars=max_bars)),
+        _signal_index(backtest_delta_breakout(df, rr=rr, max_bars=max_bars)),
+    ]
+    return _confluence_filter(primary, conf_sets, min_confirmations=2)
+
+
+def backtest_rsi_momentum_confluence(df, rr=1.5, max_bars=15):
+    """RSI Scalp with Momentum Breakout confluence."""
+    primary = backtest_rsi_scalp(df, rr=rr, max_bars=max_bars)
+    conf_trades = backtest_momentum_breakout(df, rr=rr, max_bars=max_bars)
+    return _confluence_filter(primary, [_signal_index(conf_trades)], min_confirmations=1)
+
+
+def backtest_rsi_delta_confluence(df, rr=1.5, max_bars=15):
+    """RSI Scalp with Delta Confirmation Breakout confluence."""
+    primary = backtest_rsi_scalp(df, rr=rr, max_bars=max_bars)
+    conf_trades = backtest_delta_breakout(df, rr=rr, max_bars=max_bars)
+    return _confluence_filter(primary, [_signal_index(conf_trades)], min_confirmations=1)
+
+
+def backtest_ema_momentum_confluence(df, rr=1.5, max_bars=15):
+    """EMA Pullback with Momentum Breakout confluence."""
+    primary = backtest_ema_pullback(df, rr=rr, max_bars=max_bars)
+    conf_trades = backtest_momentum_breakout(df, rr=rr, max_bars=max_bars)
+    return _confluence_filter(primary, [_signal_index(conf_trades)], min_confirmations=1)
+
+
+def backtest_ema_delta_confluence(df, rr=1.5, max_bars=15):
+    """EMA Pullback with Delta Confirmation Breakout confluence."""
+    primary = backtest_ema_pullback(df, rr=rr, max_bars=max_bars)
+    conf_trades = backtest_delta_breakout(df, rr=rr, max_bars=max_bars)
+    return _confluence_filter(primary, [_signal_index(conf_trades)], min_confirmations=1)
+
+
+def backtest_orb_volume_confluence(df, rr=1.5, max_bars=30):
+    """Opening Range Breakout with Liquidity Vacuum confluence."""
+    primary = backtest_opening_range_breakout(df, rr=rr, max_bars=max_bars)
+    conf_trades = backtest_liquidity_vacuum(df, rr=rr, max_bars=max_bars)
+    return _confluence_filter(primary, [_signal_index(conf_trades)], min_confirmations=1)
+
+
+def backtest_momentum_quote_confluence(df, rr=1.5, max_bars=20):
+    """Momentum Breakout with Quote Imbalance Breakout confluence."""
+    primary = backtest_momentum_breakout(df, rr=rr, max_bars=max_bars)
+    conf_trades = backtest_quote_imbalance_breakout(df, rr=rr, max_bars=max_bars)
+    return _confluence_filter(primary, [_signal_index(conf_trades)], min_confirmations=1)
+
+
+def backtest_momentum_delta_quote_confluence(df, rr=1.5, max_bars=20):
+    """Momentum Breakout requiring ≥2 of [Delta, Quote Imbalance, VWAP+Delta] to confirm."""
+    primary = backtest_momentum_breakout(df, rr=rr, max_bars=max_bars)
+    conf_sets = [
+        _signal_index(backtest_delta_breakout(df, rr=rr, max_bars=max_bars)),
+        _signal_index(backtest_quote_imbalance_breakout(df, rr=rr, max_bars=max_bars)),
+        _signal_index(backtest_vwap_delta(df, rr=rr, max_bars=max_bars)),
+    ]
+    return _confluence_filter(primary, conf_sets, min_confirmations=2)
+
+
 STRATEGIES = {
     "Momentum Breakout": backtest_momentum_breakout,
     "VWAP Reversion": backtest_vwap_reversion,
@@ -867,12 +988,25 @@ STRATEGIES = {
     "Quote Imbalance Breakout": backtest_quote_imbalance_breakout,
     "VWAP + Delta": backtest_vwap_delta,
     "Liquidity Vacuum": backtest_liquidity_vacuum,
+    "VWAP + Momentum Confluence": backtest_vwap_momentum_confluence,
+    "VWAP + Quote Imbalance Confluence": backtest_vwap_quote_confluence,
+    "VWAP + Delta Confluence": backtest_vwap_delta_confluence,
+    "VWAP Triple Confluence": backtest_vwap_triple_confluence,
+    "RSI + Momentum Confluence": backtest_rsi_momentum_confluence,
+    "RSI + Delta Confluence": backtest_rsi_delta_confluence,
+    "EMA + Momentum Confluence": backtest_ema_momentum_confluence,
+    "EMA + Delta Confluence": backtest_ema_delta_confluence,
+    "ORB + Volume Confluence": backtest_orb_volume_confluence,
+    "Momentum + Quote Confluence": backtest_momentum_quote_confluence,
+    "Momentum + Delta + Quote Confluence": backtest_momentum_delta_quote_confluence,
 }
 
 
 def select_strategies(daily_row: pd.Series, enabled: list[str] | None = None) -> list[str]:
     """Adaptive strategy selection based on the stock's daily characteristics.
-    If `enabled` is provided, only select from those strategies."""
+    If `enabled` is provided, only select from those strategies.
+    If the user explicitly specified strategies via --strategies, use all of them
+    regardless of score thresholds (explicit user intent bypasses adaptive filtering)."""
     available = STRATEGIES if enabled is None else [s for s in STRATEGIES if s in enabled]
     if not available:
         available = list(STRATEGIES)
@@ -882,12 +1016,16 @@ def select_strategies(daily_row: pd.Series, enabled: list[str] | None = None) ->
     qu_score = daily_row.get("quotes_score", 50)
     vol_score = daily_row.get("volatility_score", 50)
     liq_score = daily_row.get("liquidity_score", 50)
-    opt_score = daily_row.get("options_score", 50)
-    xmkt = daily_row.get("cross_market_score", 50)
 
     def pick(name):
         if name in available and name not in selected:
             selected.append(name)
+
+    # If user explicitly specified strategies, use ALL of them unconditionally
+    if enabled:
+        for s in enabled:
+            pick(s)
+        return selected
 
     pick("VWAP Reversion")
     pick("RSI Scalp")
@@ -906,6 +1044,52 @@ def select_strategies(daily_row: pd.Series, enabled: list[str] | None = None) ->
 
     if of_score > 50 and liq_score > 50:
         pick("Liquidity Vacuum")
+
+    # ── Confluence strategies: require both data sources to be strong ──
+
+    # VWAP x Momentum: volatility + order flow both confirm
+    if vol_score > 55 and of_score > 50:
+        pick("VWAP + Momentum Confluence")
+
+    # VWAP x Quote Imbalance: volatility + quotes both strong
+    if vol_score > 55 and qu_score > 50:
+        pick("VWAP + Quote Imbalance Confluence")
+
+    # VWAP x Delta: volatility + order flow
+    if vol_score > 55 and of_score > 50:
+        pick("VWAP + Delta Confluence")
+
+    # Triple confluence (VWAP): requires strong vol + order flow + quotes
+    if vol_score > 55 and of_score > 50 and qu_score > 50:
+        pick("VWAP Triple Confluence")
+
+    # RSI x Momentum
+    if vol_score > 55 and of_score > 50:
+        pick("RSI + Momentum Confluence")
+
+    # RSI x Delta
+    if of_score > 50:
+        pick("RSI + Delta Confluence")
+
+    # EMA x Momentum
+    if vol_score > 55 and of_score > 50:
+        pick("EMA + Momentum Confluence")
+
+    # EMA x Delta
+    if vol_score > 55 and of_score > 50:
+        pick("EMA + Delta Confluence")
+
+    # ORB x Volume (Liquidity Vacuum)
+    if vol_score > 55 and liq_score > 50:
+        pick("ORB + Volume Confluence")
+
+    # Momentum x Quote
+    if vol_score > 55 and qu_score > 50:
+        pick("Momentum + Quote Confluence")
+
+    # Triple confirmation on Momentum
+    if vol_score > 55 and of_score > 50 and qu_score > 50:
+        pick("Momentum + Delta + Quote Confluence")
 
     return selected
 
@@ -1376,10 +1560,11 @@ def run_pipeline(year: str, top_n: int, backtest_n: int, num_trades: int,
     for s, count in sorted(strategy_usage.items(), key=lambda x: -x[1]):
         log.info("  %s: %d selections", s, count)
 
-    # ── Build analysis DataFrames ──
+    #     ── Build analysis DataFrames ──
     sum_df = pd.DataFrame(all_summaries)
     port_df = pd.DataFrame(all_portfolio)
     trade_df = pd.DataFrame(all_trades) if all_trades else pd.DataFrame()
+    lb = []; slb = []  # default empty
     if not trade_df.empty:
         trade_df["entry_time_dt"] = pd.to_datetime(trade_df["entry_time"])
         trade_df["exit_time_dt"] = pd.to_datetime(trade_df["exit_time"])
@@ -1597,7 +1782,8 @@ def run_pipeline(year: str, top_n: int, backtest_n: int, num_trades: int,
     from openpyxl.utils.dataframe import dataframe_to_rows
     from openpyxl.utils import get_column_letter
     from openpyxl.formatting.rule import CellIsRule
-    from openpyxl.chart import LineChart, Reference
+    from openpyxl.chart import LineChart, BarChart, Reference
+    from openpyxl.chart.series import DataPoint
     import openpyxl as _openpyxl_mod
 
     wb = Workbook()
@@ -1626,8 +1812,12 @@ def run_pipeline(year: str, top_n: int, backtest_n: int, num_trades: int,
             ml = max((min(len(str(c.value or "")), mw) for c in col), default=8)
             ws.column_dimensions[get_column_letter(col[0].column)].width = ml + 2
 
-    def _xl_df(ws, df):
+    def _xl_df(ws, df, sort_by=None):
         if df.empty: return
+        if sort_by:
+            cols = [c for c in (sort_by if isinstance(sort_by, list) else [sort_by]) if c in df.columns]
+            if cols:
+                df = df.sort_values(cols, ascending=False)
         df = _strip_tz(df)
         for ri, row in enumerate(dataframe_to_rows(df, index=False, header=True), 1):
             for ci, v in enumerate(row, 1): ws.cell(row=ri, column=ci, value=v)
@@ -1644,43 +1834,140 @@ def run_pipeline(year: str, top_n: int, backtest_n: int, num_trades: int,
 
     # ── Excel: Executive_Summary (Sheet 1) ──
     ws = wb.active; ws.title = "Executive_Summary"
-    rows = [["Metric", "Value"]]
-    if lb:
-        b = lb[0]
-        rows += [["Best Strategy", b["Strategy"]], ["Best R:R", b["R:R"]],
-                 ["Total Trades", b["Trades"]], ["Win Rate", f"{b['WinRate']:.1f}%"],
-                 ["Profit Factor", f"{b['PF']:.2f}"], ["Expectancy/Trade", f"${b['Expectancy$']:+.2f}"],
-                 ["Total P&L", f"${b['TotalPnL$']:+.0f}"], ["Total P&L %", f"{b['TotalPnL%']:+.2f}%"],
-                 ["Sharpe Ratio", f"{b['Sharpe']:.2f}"], ["Max Drawdown", f"{b['MaxDD%']:.1f}%"],
-                 ["Avg Win", _fmt_dollar(b['AvgWin$'])], ["Avg Loss", _fmt_dollar(b['AvgLoss$'])],
-                 ["Largest Win", _fmt_dollar(b['LargestWin$'])], ["Largest Loss", _fmt_dollar(b['LargestLoss$'])],
-                 ["Sample Size", b["Samples"]], ["Elapsed Time", f"{mins}m {secs}s"]]
-    rows += [["", ""], ["Data Coverage", ""]]
-    for k, v in counts.items():
-        rows.append([f"  {k}", f"{v} stocks"])
-    rows += [["", ""], ["Position Sizing", ""],
-             ["Risk per trade", f"{capital.risk_pct*100:.1f}% = ${capital._risk_dollars():,.0f}"],
-             ["Max position %", f"{capital.max_position_pct*100:.0f}% of equity"],
-             ["Margin rate", f"{capital.margin_rate:.0%}"]]
-    for ri, row in enumerate(rows, 1):
-        for ci, v in enumerate(row, 1):
-            cell = ws.cell(row=ri, column=ci, value=v)
-            if ri == 1: cell.font = hdr_font; cell.fill = hdr_fill; cell.alignment = align_ctr
+
+    # single unified table: col A = metric labels, cols B+ = one per strategy (rank order)
+    metric_labels = [
+        "Total Trades", "Win Rate", "Profit Factor",
+        "Expectancy/Trade", "Total P&L", "Total P&L %", "Sharpe Ratio",
+        "Max Drawdown", "Avg Win", "Avg Loss", "Largest Win", "Largest Loss",
+        "Sample Size", "Elapsed Time",
+    ]
+
+    def _fmt_entry(b, label):
+        if label == "Total Trades": return b["Trades"]
+        if label == "Win Rate": return f"{b['WinRate']:.1f}%"
+        if label == "Profit Factor": return f"{b['PF']:.2f}"
+        if label == "Expectancy/Trade": return f"${b['Expectancy$']:+.2f}"
+        if label == "Total P&L": return f"${b['TotalPnL$']:+.0f}"
+        if label == "Total P&L %": return f"{b['TotalPnL%']:+.2f}%"
+        if label == "Sharpe Ratio": return f"{b['Sharpe']:.2f}"
+        if label == "Max Drawdown": return f"{b['MaxDD%']:.1f}%"
+        if label == "Avg Win": return _fmt_dollar(b['AvgWin$'])
+        if label == "Avg Loss": return _fmt_dollar(b['AvgLoss$'])
+        if label == "Largest Win": return _fmt_dollar(b['LargestWin$'])
+        if label == "Largest Loss": return _fmt_dollar(b['LargestLoss$'])
+        if label == "Sample Size": return b["Samples"]
+        if label == "Elapsed Time": return f"{mins}m {secs}s"
+        return ""
+
+    # Row 1: column headers
+    a1 = ws.cell(row=1, column=1, value="Metric")
+    a1.font = hdr_font; a1.fill = hdr_fill; a1.alignment = align_ctr; a1.border = border
+    for idx, b in enumerate(lb):
+        col = idx + 2  # B=2, C=3, D=4, ...
+        header_text = f"Rank {idx+1}\n{b['Strategy']}\n({b['R:R']})"
+        cell = ws.cell(row=1, column=col, value=header_text)
+        cell.font = hdr_font; cell.fill = hdr_fill; cell.alignment = align_ctr; cell.border = border
+
+    # Rows 2+: metric labels in col A, values in cols B+
+    for ri, label in enumerate(metric_labels, 2):
+        ws.cell(row=ri, column=1, value=label).border = border
+        for idx, b in enumerate(lb):
+            col = idx + 2
+            cell = ws.cell(row=ri, column=col, value=_fmt_entry(b, label))
             cell.border = border
-    ws.freeze_panes = "A2"
-    ws.column_dimensions["A"].width = 22; ws.column_dimensions["B"].width = 30
+            cell.alignment = align_ctr
+
+    metrics_end_row = 1 + len(metric_labels) + 1
+    coverage_start = metrics_end_row + 1
+
+    ws.cell(row=coverage_start, column=1, value="Data Coverage").font = hdr_font
+    ws.cell(row=coverage_start, column=1).fill = hdr_fill
+    ws.cell(row=coverage_start, column=1).border = border
+    for i, (k, v) in enumerate(counts.items()):
+        ri = coverage_start + 1 + i
+        ws.cell(row=ri, column=1, value=f"  {k}").border = border
+        ws.cell(row=ri, column=2, value=f"{v} stocks").border = border
+
+    pos_start = coverage_start + 1 + len(counts) + 1
+    ws.cell(row=pos_start, column=1, value="Position Sizing").font = hdr_font
+    ws.cell(row=pos_start, column=1).fill = hdr_fill
+    ws.cell(row=pos_start, column=1).border = border
+    pos_items = [
+        ("Risk per trade", f"{capital.risk_pct*100:.1f}% = ${capital._risk_dollars():,.0f}"),
+        ("Max position %", f"{capital.max_position_pct*100:.0f}% of equity"),
+        ("Margin rate", f"{capital.margin_rate:.0%}"),
+    ]
+    for i, (label, val) in enumerate(pos_items):
+        ri = pos_start + 1 + i
+        ws.cell(row=ri, column=1, value=label).border = border
+        ws.cell(row=ri, column=2, value=val).border = border
+
+    ws.freeze_panes = "B2"
+    ws.column_dimensions["A"].width = 22
+    for idx in range(len(lb)):
+        col = idx + 2
+        ws.column_dimensions[get_column_letter(col)].width = 30
 
     # ── Excel: Strategy_Comparison ──
-    ws = wb.create_sheet("Strategy_Comparison")
+    ws = wb.create_sheet("(C) Strategy_Comparison")
     sc_cols = ["Strategy", "R:R", "Trades", "WinRate", "PF", "Expectancy$", "TotalPnL$", "TotalPnL%", "Sharpe", "MaxDD%", "AvgWin$", "AvgLoss$", "LargestWin$", "LargestLoss$", "Sample"]
     sc_df = pd.DataFrame(lb)[[c for c in sc_cols if c in (lb[0] if lb else {})]] if lb else pd.DataFrame()
-    _xl_df(ws, sc_df); _xl_hdr(ws); _xl_autow(ws)
+    _xl_df(ws, sc_df, sort_by=["PF", "WinRate"]); _xl_hdr(ws); _xl_autow(ws)
+
+    # Charts: 4 separate charts — PF, WinRate, Sharpe+PnL%, Trades
+    if not sc_df.empty and len(sc_df) > 0:
+        n_rows = len(sc_df) + 1
+        cats = Reference(ws, min_col=1, min_row=2, max_row=n_rows)
+        chart_w = 44; chart_h = 20
+
+        # Chart 1: Profit Factor
+        ch1 = BarChart()
+        ch1.title = "Profit Factor"; ch1.y_axis.title = "PF"
+        ch1.style = 10; ch1.height = chart_h; ch1.width = chart_w
+        ch1.add_data(Reference(ws, min_col=5, min_row=1, max_row=n_rows, max_col=5), titles_from_data=True)
+        ch1.set_categories(cats)
+        ch1.series[0].graphicalProperties.solidFill = "2F5496"
+        ch1.legend = None
+        ws.add_chart(ch1, f"A{n_rows + 3}")
+
+        # Chart 2: Win Rate
+        ch2 = BarChart()
+        ch2.title = "Win Rate %"; ch2.y_axis.title = "Win Rate (%)"
+        ch2.style = 10; ch2.height = chart_h; ch2.width = chart_w
+        ch2.add_data(Reference(ws, min_col=4, min_row=1, max_row=n_rows, max_col=4), titles_from_data=True)
+        ch2.set_categories(cats)
+        ch2.series[0].graphicalProperties.solidFill = "4472C4"
+        ch2.legend = None
+        ws.add_chart(ch2, f"A{n_rows + chart_h + 5}")
+
+        # Chart 3: Sharpe + Total PnL% (blue=Sharpe, gold=PnL%)
+        ch3 = BarChart()
+        ch3.grouping = "clustered"
+        ch3.title = "Sharpe Ratio & Total PnL%"; ch3.y_axis.title = "Sharpe / PnL%"
+        ch3.style = 10; ch3.height = chart_h; ch3.width = chart_w
+        ch3.add_data(Reference(ws, min_col=9, min_row=1, max_row=n_rows, max_col=9), titles_from_data=True)
+        ch3.add_data(Reference(ws, min_col=8, min_row=1, max_row=n_rows, max_col=8), titles_from_data=True)
+        ch3.set_categories(cats)
+        ch3.series[0].graphicalProperties.solidFill = "2F5496"
+        ch3.series[1].graphicalProperties.solidFill = "FFC000"
+        ws.add_chart(ch3, f"A{n_rows + chart_h * 2 + 7}")
+
+        # Chart 4: Total Trades (sample size context)
+        ch4 = BarChart()
+        ch4.title = "Total Trades"; ch4.y_axis.title = "Trades"
+        ch4.style = 10; ch4.height = chart_h; ch4.width = chart_w
+        ch4.add_data(Reference(ws, min_col=3, min_row=1, max_row=n_rows, max_col=3), titles_from_data=True)
+        ch4.set_categories(cats)
+        ch4.series[0].graphicalProperties.solidFill = "7030A0"
+        ch4.legend = None
+        ws.add_chart(ch4, f"A{n_rows + chart_h * 3 + 9}")
 
     # ── Excel: Stock_Leaderboard ──
     ws = wb.create_sheet("Stock_Leaderboard")
     if slb:
         slb_cols = [k for k in slb[0] if k != "_composite"]
-        _xl_df(ws, pd.DataFrame(slb)[slb_cols])
+        _xl_df(ws, pd.DataFrame(slb)[slb_cols], sort_by=["PF", "OppScore"])
     _xl_hdr(ws); _xl_autow(ws)
 
     # ── Excel: Daily_Rankings ──
@@ -1689,7 +1976,7 @@ def run_pipeline(year: str, top_n: int, backtest_n: int, num_trades: int,
                                "liquidity_score", "orderflow_score", "volatility_score",
                                "quotes_score", "options_score", "cross_market_score"]
                   if c in daily_df.columns]
-    _xl_df(ws, _strip_tz(daily_df.head(2000))[rank_cols])
+    _xl_df(ws, _strip_tz(daily_df.head(2000).sort_values("opportunity_score", ascending=False))[rank_cols])
     _xl_hdr(ws); _xl_autow(ws)
 
     # ── Excel: Trades ──
@@ -1707,8 +1994,8 @@ def run_pipeline(year: str, top_n: int, backtest_n: int, num_trades: int,
     _xl_hdr(ws, nc=len(td_avail)); _xl_autow(ws)
 
     # ── Excel: Time_of_Day ──
-    ws = wb.create_sheet("Time_of_Day")
-    tz_rows = [["Strategy", "R:R", "Time Zone", "Avg PnL %", "N Trades", "Win Rate", "Total PnL", "PF", "Sharpe"]]
+    ws = wb.create_sheet("(C) Time_of_Day")
+    tz_data = []
     for (s_name, rr, tz), pnls in sorted(time_zone_stats.items(), key=lambda x: -len(x[1])):
         if len(pnls) < 3: continue
         pnl_arr = np.array(pnls)
@@ -1718,31 +2005,84 @@ def run_pipeline(year: str, top_n: int, backtest_n: int, num_trades: int,
         pf = _safe_div(total_win, total_loss, 999)
         std = pnl_arr.std(); exp = pnl_arr.mean()
         sh = _safe_div(exp, std) * np.sqrt(252) if std > 0 else 0
-        tz_rows.append([s_name, f"1:{rr}", tz, round(exp, 4), n, round(wr, 1), round(pnl_arr.sum(), 4), round(pf, 2), round(sh, 2)])
+        tz_data.append([s_name, f"1:{rr}", tz, round(exp, 4), n, round(wr, 1), round(pnl_arr.sum(), 4), round(pf, 2), round(sh, 2)])
+    tz_data.sort(key=lambda r: r[7], reverse=True)  # sort by PF col
+    tz_rows = [["Strategy", "R:R", "Time Zone", "Avg PnL %", "N Trades", "Win Rate", "Total PnL", "PF", "Sharpe"]] + tz_data
     for ri, row in enumerate(tz_rows, 1):
         for ci, v in enumerate(row, 1): ws.cell(row=ri, column=ci, value=v)
     _xl_hdr(ws, nc=len(tz_rows[0])); _xl_autow(ws)
 
+    # Separate bar charts: PF, Win Rate, and Sharpe+PnL for clean scaling
+    if len(tz_data) > 0:
+        n_rows = len(tz_data) + 1
+        cats = Reference(ws, min_col=3, min_row=2, max_row=n_rows)
+        cw = 40; ch = 18
+
+        ch1 = BarChart()
+        ch1.title = "Profit Factor"; ch1.y_axis.title = "PF"
+        ch1.style = 10; ch1.height = ch; ch1.width = cw
+        ch1.add_data(Reference(ws, min_col=8, min_row=1, max_row=n_rows, max_col=8), titles_from_data=True)
+        ch1.set_categories(cats)
+        ch1.series[0].graphicalProperties.solidFill = "2F5496"
+        ch1.legend = None
+        ws.add_chart(ch1, f"L{n_rows + 3}")
+
+        ch2 = BarChart()
+        ch2.title = "Win Rate %"; ch2.y_axis.title = "Win Rate (%)"
+        ch2.style = 10; ch2.height = ch; ch2.width = cw
+        ch2.add_data(Reference(ws, min_col=6, min_row=1, max_row=n_rows, max_col=6), titles_from_data=True)
+        ch2.set_categories(cats)
+        ch2.series[0].graphicalProperties.solidFill = "4472C4"
+        ch2.legend = None
+        ws.add_chart(ch2, f"L{n_rows + ch + 5}")
+
     # ── Excel: Day_of_Week ──
-    ws = wb.create_sheet("Day_of_Week")
-    dow_rows = [["Day", "N Trades", "Win Rate", "PF", "Expectancy$", "Total PnL$", "Sharpe", "AvgWin$", "AvgLoss$", "MaxDD%"]]
+    ws = wb.create_sheet("(C) Day_of_Week")
+    dow_data = []
     if not trade_df.empty and "day_of_week" in trade_df.columns:
         for dow in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]:
             d_t = trade_df[trade_df["day_of_week"] == dow]
             if len(d_t) < 3: continue
             m = _trade_metrics(d_t)
-            dow_rows.append([dow, m["n_trades"], round(m["win_rate"], 1), round(m["profit_factor"], 2),
+            dow_data.append([dow, m["n_trades"], round(m["win_rate"], 1), round(m["profit_factor"], 2),
                              round(m["expectancy"], 2), round(m["total_pnl"], 2),
                              round(m["sharpe"], 2), round(m["avg_win"], 2),
                              round(m["avg_loss"], 2), 0])
+    dow_data.sort(key=lambda r: r[3], reverse=True)  # sort by PF
+    dow_rows = [["Day", "N Trades", "Win Rate", "PF", "Expectancy$", "Total PnL$", "Sharpe", "AvgWin$", "AvgLoss$", "MaxDD%"]] + dow_data
     for ri, row in enumerate(dow_rows, 1):
         for ci, v in enumerate(row, 1): ws.cell(row=ri, column=ci, value=v)
     _xl_hdr(ws, nc=len(dow_rows[0])); _xl_autow(ws)
 
+    # Separate bar charts
+    if len(dow_data) > 0:
+        n_rows = len(dow_data) + 1
+        cats = Reference(ws, min_col=1, min_row=2, max_row=n_rows)
+        cw = 36; ch = 16
+
+        ch1 = BarChart()
+        ch1.title = "Profit Factor"; ch1.y_axis.title = "PF"
+        ch1.style = 10; ch1.height = ch; ch1.width = cw
+        ch1.add_data(Reference(ws, min_col=4, min_row=1, max_row=n_rows, max_col=4), titles_from_data=True)
+        ch1.set_categories(cats)
+        ch1.series[0].graphicalProperties.solidFill = "2F5496"
+        ch1.legend = None
+        ws.add_chart(ch1, f"A{n_rows + 3}")
+
+        ch2 = BarChart()
+        ch2.title = "Win Rate %"; ch2.y_axis.title = "Win Rate (%)"
+        ch2.style = 10; ch2.height = ch; ch2.width = cw
+        ch2.add_data(Reference(ws, min_col=3, min_row=1, max_row=n_rows, max_col=3), titles_from_data=True)
+        ch2.set_categories(cats)
+        ch2.series[0].graphicalProperties.solidFill = "4472C4"
+        ch2.legend = None
+        ws.add_chart(ch2, f"A{n_rows + ch + 5}")
+
     # ── Excel: Factor_Analysis ──
     ws = wb.create_sheet("Factor_Analysis")
     fa_scores = ["liquidity_score", "orderflow_score", "volatility_score", "quotes_score", "options_score", "cross_market_score"]
-    fa_rows = [["Factor", "Quintile", "N Trades", "Win Rate", "PF", "Expectancy$", "Total PnL$", "Sharpe"]]
+    fa_header = ["Factor", "Quintile", "N Trades", "Win Rate", "PF", "Expectancy$", "Total PnL$", "Sharpe"]
+    fa_data = []
     if not trade_df.empty and not daily_df.empty:
         for score_name in fa_scores:
             if score_name not in daily_df.columns: continue
@@ -1752,18 +2092,20 @@ def run_pipeline(year: str, top_n: int, backtest_n: int, num_trades: int,
                     q_d = daily_df[daily_df["_q_temp"] == q][["ticker", "date"]]
                     q_t = trade_df.merge(q_d, on="ticker", how="inner") if not trade_df.empty else pd.DataFrame()
                     m = _trade_metrics(q_t)
-                    fa_rows.append([score_name.replace("_score",""), str(q), m["n_trades"], round(m["win_rate"],1),
+                    fa_data.append([score_name.replace("_score",""), str(q), m["n_trades"], round(m["win_rate"],1),
                                     round(m["profit_factor"],2), round(m["expectancy"],2),
                                     round(m["total_pnl"],2), round(m["sharpe"],2)])
             except Exception: pass
-    for ri, row in enumerate(fa_rows, 1):
+    fa_data.sort(key=lambda r: (r[1], r[4]), reverse=False)  # sort by quintile then PF
+    for ri, row in enumerate([fa_header] + fa_data, 1):
         for ci, v in enumerate(row, 1): ws.cell(row=ri, column=ci, value=v)
-    _xl_hdr(ws, nc=len(fa_rows[0])); _xl_autow(ws)
+    _xl_hdr(ws, nc=len(fa_header)); _xl_autow(ws)
 
     # ── Excel: Options_Analysis ──
     ws = wb.create_sheet("Options_Analysis")
     opt_cols = ["opt_straddle_pct", "opt_expected_move_pct", "opt_total_vol", "opt_put_call_ratio", "chain_atm_iv", "chain_iv_skew", "options_score"]
-    opt_rows = [["Metric", "Quintile", "N Trades", "Win Rate", "PF", "Expectancy$", "Total PnL$", "Sharpe"]]
+    opt_header = ["Metric", "Quintile", "N Trades", "Win Rate", "PF", "Expectancy$", "Total PnL$", "Sharpe"]
+    opt_data = []
     if not trade_df.empty and not daily_df.empty:
         for col in opt_cols:
             if col not in daily_df.columns: continue
@@ -1774,18 +2116,20 @@ def run_pipeline(year: str, top_n: int, backtest_n: int, num_trades: int,
                     q_d = daily_df[daily_df["_oq"] == q][["ticker", "date"]]
                     q_t = trade_df.merge(q_d, on="ticker", how="inner") if not trade_df.empty else pd.DataFrame()
                     m = _trade_metrics(q_t)
-                    opt_rows.append([col, str(q), m["n_trades"], round(m["win_rate"],1),
+                    opt_data.append([col, str(q), m["n_trades"], round(m["win_rate"],1),
                                      round(m["profit_factor"],2), round(m["expectancy"],2),
                                      round(m["total_pnl"],2), round(m["sharpe"],2)])
             except Exception: pass
-    for ri, row in enumerate(opt_rows, 1):
+    opt_data.sort(key=lambda r: (r[1], r[4]), reverse=False)  # sort by quintile then PF
+    for ri, row in enumerate([opt_header] + opt_data, 1):
         for ci, v in enumerate(row, 1): ws.cell(row=ri, column=ci, value=v)
-    _xl_hdr(ws, nc=len(opt_rows[0])); _xl_autow(ws)
+    _xl_hdr(ws, nc=len(opt_header)); _xl_autow(ws)
 
     # ── Excel: Microstructure ──
     ws = wb.create_sheet("Microstructure")
     ms_cols = ["avg_spread_qu", "qu_imbalance_mean", "tr_delta_sum", "tr_aggression_ratio", "trade_freq"]
-    ms_rows = [["Metric", "Quintile", "N Trades", "Win Rate", "PF", "Expectancy$", "Total PnL$", "Sharpe"]]
+    ms_header = ["Metric", "Quintile", "N Trades", "Win Rate", "PF", "Expectancy$", "Total PnL$", "Sharpe"]
+    ms_data = []
     if not trade_df.empty and not daily_df.empty:
         for col in ms_cols:
             if col not in daily_df.columns: continue
@@ -1796,25 +2140,26 @@ def run_pipeline(year: str, top_n: int, backtest_n: int, num_trades: int,
                     q_d = daily_df[daily_df["_mq"] == q][["ticker", "date"]]
                     q_t = trade_df.merge(q_d, on="ticker", how="inner") if not trade_df.empty else pd.DataFrame()
                     m = _trade_metrics(q_t)
-                    ms_rows.append([col, str(q), m["n_trades"], round(m["win_rate"],1),
+                    ms_data.append([col, str(q), m["n_trades"], round(m["win_rate"],1),
                                     round(m["profit_factor"],2), round(m["expectancy"],2),
                                     round(m["total_pnl"],2), round(m["sharpe"],2)])
             except Exception: pass
-    for ri, row in enumerate(ms_rows, 1):
+    ms_data.sort(key=lambda r: (r[1], r[4]), reverse=False)
+    for ri, row in enumerate([ms_header] + ms_data, 1):
         for ci, v in enumerate(row, 1): ws.cell(row=ri, column=ci, value=v)
-    _xl_hdr(ws, nc=len(ms_rows[0])); _xl_autow(ws)
+    _xl_hdr(ws, nc=len(ms_header)); _xl_autow(ws)
 
-    # ── Excel: Equity_Curve ──
+    # ── Excel: Equity_Curve (trade log) ──
     ws = wb.create_sheet("Equity_Curve")
     if not trade_df.empty:
         trade_df_sorted = trade_df.sort_values("exit_time_dt") if "exit_time_dt" in trade_df.columns else trade_df.copy()
         eq_rows = [["Trade#", "Exit Time", "Strategy", "R:R", "P&L$", "Cumulative P&L$", "Running Equity"]]
-        cum = 0; eq = capital.starting_cash
+        cum = 0; eq_start = capital.starting_cash
         for i, (_, t) in enumerate(trade_df_sorted.iterrows(), 1):
-            cum += t.get("pnl_$", 0); eq += t.get("pnl_$", 0)
+            cum += t.get("pnl_$", 0)
             eq_rows.append([i, str(t.get("exit_time", "")), t.get("strategy", ""),
                             f"1:{t.get('rr_ratio','')}",
-                            round(t.get("pnl_$", 0), 2), round(cum, 2), round(eq, 2)])
+                            round(t.get("pnl_$", 0), 2), round(cum, 2), round(eq_start + cum, 2)])
         if not port_df.empty:
             eq_rows.append(["", "", "", "", "", "", ""])
             eq_rows.append(["Portfolio Summary", "", "Strategy", "Total Return$", "Return%", "MaxDD%", "Trades"])
@@ -1825,16 +2170,94 @@ def run_pipeline(year: str, top_n: int, backtest_n: int, num_trades: int,
         for ri, row in enumerate(eq_rows, 1):
             for ci, v in enumerate(row, 1): ws.cell(row=ri, column=ci, value=v)
         _xl_hdr(ws, nc=len(eq_rows[0])); _xl_autow(ws)
-        # Conditional format on cumulative P&L
         if len(eq_rows) > 1:
             _xl_cfmt(ws, 5)
     else:
         ws.cell(row=1, column=1, value="No trades executed")
 
+    # ── Excel: Equity_Curves (one line per Strategy×R:R) ──
+    ws_eqcurves = wb.create_sheet("(C) Equity_Curves")
+    if not trade_df.empty and "pnl_$" in trade_df.columns:
+        trade_df_sorted = trade_df.sort_values("exit_time_dt") if "exit_time_dt" in trade_df.columns else trade_df.copy()
+        combos = trade_df_sorted.groupby(["strategy", "rr_ratio"])
+        combo_keys = []
+        for (s, rr), grp in combos:
+            if len(grp) < 2: continue
+            combo_keys.append((s, rr))
+
+        if combo_keys:
+            # Shorten strategy names for legend
+            _short = {
+                "Momentum Breakout": "MomBrk", "VWAP Reversion": "VWAP",
+                "RSI Scalp": "RSI", "EMA Pullback": "EMA",
+                "Opening Range Breakout": "ORB",
+                "Delta Confirmation Breakout": "DeltaBrk",
+                "Quote Imbalance Breakout": "QuoteBrk",
+                "VWAP + Delta": "VWAP+Del",
+                "Liquidity Vacuum": "LiqVac",
+                "VWAP + Momentum Confluence": "VWAP+Mom",
+                "VWAP + Quote Imbalance Confluence": "VWAP+Qu",
+                "VWAP + Delta Confluence": "VWAP+DelC",
+                "VWAP Triple Confluence": "VWAPx3",
+                "RSI + Momentum Confluence": "RSI+Mom",
+                "RSI + Delta Confluence": "RSI+Del",
+                "EMA + Momentum Confluence": "EMA+Mom",
+                "EMA + Delta Confluence": "EMA+Del",
+                "ORB + Volume Confluence": "ORB+Vol",
+                "Momentum + Quote Confluence": "Mom+Qu",
+                "Momentum + Delta + Quote Confluence": "MomDQu",
+            }
+            max_len = max(
+                len(trade_df_sorted[(trade_df_sorted["strategy"] == s) & (trade_df_sorted["rr_ratio"] == rr)])
+                for s, rr in combo_keys
+            )
+            ec_header = ["Trade#"] + [f"{_short.get(s, s[:8])} 1:{rr}" for s, rr in combo_keys]
+            ec_rows = []
+            for i in range(max_len):
+                row = [i + 1]
+                for s, rr in combo_keys:
+                    subset = trade_df_sorted[(trade_df_sorted["strategy"] == s) & (trade_df_sorted["rr_ratio"] == rr)]
+                    pnl_values = subset["pnl_$"].values
+                    if i < len(pnl_values):
+                        cum_pnl = pnl_values[:i + 1].sum()
+                        row.append(round(cum_pnl, 2))
+                    else:
+                        row.append(None)
+                ec_rows.append(row)
+            for ci, h in enumerate(ec_header, 1):
+                ws_eqcurves.cell(row=1, column=ci, value=h)
+            for ri, row in enumerate(ec_rows, 2):
+                for ci, v in enumerate(row, 1):
+                    ws_eqcurves.cell(row=ri, column=ci, value=v)
+            _xl_hdr(ws_eqcurves, nc=len(ec_header)); _xl_autow(ws_eqcurves)
+
+            # Line chart: wider, legend on bottom
+            if len(combo_keys) > 0:
+                chart = LineChart()
+                chart.title = "Equity Curves by Strategy × R:R"
+                chart.y_axis.title = "Cumulative P&L ($)"
+                chart.x_axis.title = "Trade #"
+                chart.style = 10; chart.height = 20; chart.width = 52
+                chart.legend.position = 'b'
+                colors = ["2F5496", "C00000", "548235", "BF8F00", "7030A0",
+                          "00B0F0", "FF6600", "4472C4", "A5A5A5", "FFC000"]
+                for idx, (s, rr) in enumerate(combo_keys):
+                    col_idx = idx + 2
+                    data_ref = Reference(ws_eqcurves, min_col=col_idx, min_row=1,
+                                         max_row=min(max_len + 1, 501), max_col=col_idx)
+                    chart.add_data(data_ref, titles_from_data=True)
+                    chart.series[idx].graphicalProperties.solidFill = colors[idx % len(colors)]
+                cats_ref = Reference(ws_eqcurves, min_col=1, min_row=2, max_row=min(max_len + 1, 501))
+                chart.set_categories(cats_ref)
+                ws_eqcurves.add_chart(chart, f"A{max_len + 4}")
+    else:
+        ws_eqcurves.cell(row=1, column=1, value="No trades with $ metrics available")
+
     # ── Excel: Data_Quality ──
     ws = wb.create_sheet("Data_Quality")
-    dq_rows = [["Ticker", "OHLCV", "Trades", "Quotes", "Options", "Chains",
-                "Missing%", "Backtested", "N Trades"]]
+    dq_header = ["Ticker", "OHLCV", "Trades", "Quotes", "Options", "Chains",
+                "Missing%", "Backtested", "N Trades"]
+    dq_data = []
     for ticker in sorted(availability.keys()):
         av = availability[ticker]
         present = sum(1 for v in av.values() if v)
@@ -1842,16 +2265,17 @@ def run_pipeline(year: str, top_n: int, backtest_n: int, num_trades: int,
         missing_pct = (1 - present / total) * 100 if total > 0 else 100
         bt = "Y" if ticker in backtest_tickers else ""
         tk_cnt = len(trade_df[trade_df["ticker"] == ticker]) if not trade_df.empty else 0
-        dq_rows.append([ticker, "Y" if av["OHLCV"] else "-", "Y" if av["Trades"] else "-",
+        dq_data.append([ticker, "Y" if av["OHLCV"] else "-", "Y" if av["Trades"] else "-",
                         "Y" if av["Quotes"] else "-", "Y" if av["Options"] else "-",
                         "Y" if av["Chains"] else "-", round(missing_pct, 1), bt, tk_cnt])
-    for ri, row in enumerate(dq_rows, 1):
+    dq_data.sort(key=lambda r: r[6])  # sort by missing_pct ascending
+    for ri, row in enumerate([dq_header] + dq_data, 1):
         for ci, v in enumerate(row, 1): ws.cell(row=ri, column=ci, value=v)
-    _xl_hdr(ws, nc=len(dq_rows[0])); _xl_autow(ws)
+    _xl_hdr(ws, nc=len(dq_header)); _xl_autow(ws)
 
     # ── Excel: Keep existing sheets for backward compat ──
     ws = wb.create_sheet("Strategy Signals")
-    if not sum_df.empty: _xl_df(ws, sum_df); _xl_hdr(ws); _xl_autow(ws)
+    if not sum_df.empty: _xl_df(ws, sum_df, sort_by="profit_factor"); _xl_hdr(ws); _xl_autow(ws)
     ws = wb.create_sheet("Cross Market Confirm")
     if not daily_df.empty:
         xm_cols = [c for c in ["ticker", "date", "opportunity_score", "cross_market_score",
@@ -1860,13 +2284,14 @@ def run_pipeline(year: str, top_n: int, backtest_n: int, num_trades: int,
         _xl_hdr(ws); _xl_autow(ws)
     ws = wb.create_sheet("Strategy Summary")
     if not sum_df.empty:
-        _xl_df(ws, sum_df.groupby(["strategy", "rr_ratio"]).agg(
+        sm_df = sum_df.groupby(["strategy", "rr_ratio"]).agg(
             n_tickers=("ticker","nunique"), total_trades=("total_trades","sum"),
             avg_wr=("win_rate_%","mean"), avg_pf=("profit_factor","mean"),
             total_pnl=("total_pnl_%","sum"), avg_exp=("expectancy_%","mean"),
-            avg_sharpe=("sharpe_approx","mean")).reset_index())
+            avg_sharpe=("sharpe_approx","mean")).reset_index()
+        _xl_df(ws, sm_df, sort_by=["avg_pf", "total_pnl"])
         _xl_hdr(ws); _xl_autow(ws)
-    ws = wb.create_sheet("R-R Comparison")
+    ws = wb.create_sheet("(C) R-R Comparison")
     row_offset = 1
     for rr in rr_ratios:
         sub = sum_df[sum_df["rr_ratio"] == rr] if not sum_df.empty else pd.DataFrame()
@@ -1879,17 +2304,149 @@ def run_pipeline(year: str, top_n: int, backtest_n: int, num_trades: int,
             for ci, v in enumerate(row, 1): ws.cell(row=ri, column=ci, value=v)
         row_offset += len(agg) + 3
     _xl_autow(ws)
+
+    # Summary bar chart at bottom of R-R sheet
+    if not sum_df.empty and sum_df["rr_ratio"].nunique() > 0:
+        rr_summary = sum_df.groupby("rr_ratio").agg(
+            avg_pf=("profit_factor", "mean"), total_pnl=("total_pnl_%", "sum"),
+            avg_wr=("win_rate_%", "mean")
+        ).reset_index()
+        chart_start = row_offset + 2
+        rr_summary["rr_label"] = rr_summary["rr_ratio"].apply(lambda x: f"1:{x}")
+        for i, (_, r) in enumerate(rr_summary.iterrows()):
+            for j, col in enumerate(["rr_label", "avg_pf", "total_pnl", "avg_wr"]):
+                ws.cell(row=chart_start + i, column=j + 1, value=r[col])
+        ws.cell(row=chart_start, column=1, value="R:R Summary").font = Font(bold=True, size=11)
+        n_rr = len(rr_summary)
+        cats = Reference(ws, min_col=1, min_row=chart_start + 1, max_row=chart_start + n_rr)
+
+        ch1 = BarChart()
+        ch1.title = "Profit Factor by R:R"
+        ch1.y_axis.title = "PF"; ch1.style = 10
+        ch1.height = 18; ch1.width = 36
+        ch1.add_data(Reference(ws, min_col=2, min_row=chart_start, max_row=chart_start + n_rr, max_col=2), titles_from_data=True)
+        ch1.set_categories(cats)
+        ch1.series[0].graphicalProperties.solidFill = "2F5496"
+        ch1.legend = None
+        ws.add_chart(ch1, f"F{chart_start}")
+
+        ch2 = BarChart()
+        ch2.title = "Win Rate % by R:R"
+        ch2.y_axis.title = "Win Rate (%)"; ch2.style = 10
+        ch2.height = 18; ch2.width = 36
+        ch2.add_data(Reference(ws, min_col=4, min_row=chart_start, max_row=chart_start + n_rr, max_col=4), titles_from_data=True)
+        ch2.set_categories(cats)
+        ch2.series[0].graphicalProperties.solidFill = "4472C4"
+        ch2.legend = None
+        ws.add_chart(ch2, f"F{chart_start + 20}")
     ws = wb.create_sheet("Drawdown")
     if not port_df.empty:
-        _xl_df(ws, port_df.groupby("strategy")["max_drawdown_%"].agg(["mean","max","min"]).reset_index())
+        _xl_df(ws, port_df.groupby("strategy")["max_drawdown_%"].agg(["mean","max","min"]).reset_index(), sort_by="mean")
         _xl_hdr(ws); _xl_autow(ws)
     ws = wb.create_sheet("Performance")
     if not port_df.empty:
         _xl_df(ws, port_df.groupby(["strategy","rr_ratio"]).agg(
             total_return=("total_return_$","sum"), avg_return=("total_return_%","mean"),
             max_dd=("max_drawdown_%","mean"), n_trades=("total_trades","sum"),
-            commission=("total_commission","sum")).reset_index())
+            commission=("total_commission","sum")).reset_index(), sort_by="total_return")
         _xl_hdr(ws); _xl_autow(ws)
+
+    # ── Excel: README (documentation sheet) ──
+    readme_lines = [
+        ["SCALPING ANALYSIS — EXCEL README"],
+        [""],
+        ["SHEET OVERVIEW"],
+        [""],
+        ["SUMMARY SHEETS (top of workbook)"],
+        ["  Executive_Summary       Best strategy/R:R, data coverage, position sizing"],
+        ["  (C) Strategy_Comparison  Ranked table + 4 charts: PF, WinRate, Sharpe+PnL%, Trades"],
+        ["  Stock_Leaderboard        Per-ticker scores + best strategy + backtest metrics"],
+        ["  Daily_Rankings           Daily top-stock table with component scores (0-100)"],
+        [""],
+        ["TRADE DETAIL SHEETS"],
+        ["  Trades                   Individual trade log: entry/exit/stop, P&L, risk, margin"],
+        ["  (C) Equity_Curve         Raw trade log with cumulative P&L"],
+        ["  (C) Equity_Curves        One cumulative P&L column per Strategy×R:R combo + line chart"],
+        [""],
+        ["ANALYSIS SHEETS"],
+        ["  (C) Time_of_Day          Performance by ET time bucket (09:30-09:45, etc.) + PF/WR charts"],
+        ["  (C) Day_of_Week          Performance by weekday + PF/WR charts"],
+        ["  Factor_Analysis          Performance by quintile for each composite score (Liq/OF/Vol/Qu/Opt/XMkt)"],
+        ["  Options_Analysis         Performance by straddle%, expected move, IV, put/call quintiles"],
+        ["  Microstructure           Performance by spread, quote imbalance, delta, aggression quintiles"],
+        [""],
+        ["COMPARISON SHEETS"],
+        ["  (C) R-R Comparison       Aggregated PF & Win Rate by R:R ratio across all strategies + charts"],
+        ["  Strategy Signals         Per-ticker raw strategy trade summaries (pre-portfolio)"],
+        ["  Cross Market Confirm     Top 100 daily rows by cross-market confirmation score"],
+        ["  Strategy Summary         Averaged per-strategy × R:R metrics (n_tickers, avg_wr, avg_pf, etc.)"],
+        ["  Drawdown                 Max drawdown by strategy (mean/max/min)"],
+        ["  Performance              Total return, avg return, max DD by strategy+R:R"],
+        [""],
+        ["REFERENCE SHEETS"],
+        ["  Data_Quality             Per-ticker: which datasets exist, missing%, backtest status"],
+        ["  README                   This sheet"],
+        [""],
+        ["CHART LEGEND"],
+        ["  Dark blue bars (#2F5496)  = Profit Factor or Sharpe Ratio"],
+        ["  Medium blue (#4472C4)     = Win Rate %"],
+        ["  Gold/Yellow (#FFC000)     = Total PnL% (on cluster charts)"],
+        ["  Purple (#7030A0)          = Total Trades"],
+        ["  Equity_Curves uses distinct per-strategy line colours"],
+        [""],
+        ["KEY METRICS — HOW TO READ THEM"],
+        [""],
+        ["  Profit Factor (PF)        Gross wins / gross losses. > 1 = profitable. "],
+        ["                            Higher = better risk/reward. Below 1 = losing."],
+        [""],
+        ["  Win Rate (WR)             % of resolved trades that won. With R:R 2:1, ~40% WR"],
+        ["                            is already profitable. WR alone is insufficient; must be"],
+        ["                            paired with PF and expectancy."],
+        [""],
+        ["  Expectancy ($)            Average profit per trade (including losses). Positive = "],
+        ["                            system has edge. Magnitude matters less than consistency."],
+        [""],
+        ["  Sharpe Ratio              Risk-adjusted return. > 1.0 = good. Compares expectancy to"],
+        ["                            volatility of returns. Higher = smoother equity curve."],
+        [""],
+        ["  Max Drawdown %            Largest peak-to-trough decline. Lower is better. "],
+        ["                            > 20% suggests position sizing may be too aggressive."],
+        [""],
+        ["  Total PnL%                Sum of all trade percentage P&L (includes timeouts)."],
+        ["                            Negative with high WR means timeouts are dragging results."],
+        [""],
+        ["  Opportunity Score (0-100) Composite ranking combining liquidity, order flow, "],
+        ["                            volatility, quotes, options, and cross-market confirmation."],
+        ["                            Higher = better scalping candidate for that day."],
+        [""],
+        ["IMPORTANT CAVEATS"],
+        [""],
+        ["  - Ranks use ONLY information available at that timestamp (no look-ahead bias)"],
+        ["  - margin_used ≠ risk_$: margin = position_value × margin_rate; risk_$ = actual loss if stopped"],
+        ["  - Timeout trades are included in Total PnL% but excluded from Win Rate"],
+        ["  - <20 trades = LOW sample (flagged); interpret with caution"],
+        ["  - Confluence strategies filter primary signals through secondary confirmations"],
+        ["    (e.g., VWAP + Momentum Confluence = VWAP-signaled trades where Momentum"],
+        ["     also signals same direction at the same bar)"],
+        ["  - All charts use separate axes per metric — no mixed-scale distortion"],
+        [""],
+        ["SHEETS MARKED '(C) ' contain embedded Excel charts."],
+        [""],
+        ["Generated by scripts/strategy/scalping/scalping_analysis.py"],
+    ]
+
+    ws_readme = wb.create_sheet("README")
+    for ri, row in enumerate(readme_lines, 1):
+        for ci, v in enumerate(row, 1):
+            cell = ws_readme.cell(row=ri, column=ci, value=v)
+            if ri == 1:
+                cell.font = Font(bold=True, size=14, color="2F5496")
+            elif str(v).startswith("  ") and not str(v).startswith("    "):
+                cell.font = Font(bold=True, size=11)
+            elif str(v).startswith("SUMMARY") or str(v).startswith("TRADE") or str(v).startswith("ANALYSIS") or str(v).startswith("COMPARISON") or str(v).startswith("REFERENCE") or str(v).startswith("CHART") or str(v).startswith("KEY") or str(v).startswith("IMPORTANT") or str(v).startswith("SHEETS"):
+                cell.font = Font(bold=True, size=12, color="2F5496")
+    ws_readme.column_dimensions["A"].width = 90
+    ws_readme.freeze_panes = "A2"
 
     wb.save(output_path)
     log.info("Excel saved to: %s", output_path)
